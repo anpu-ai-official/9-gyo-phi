@@ -1,0 +1,39 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "9-gyo-phi",
+  "version": "0.2.0",
+  "identifier": "com.ninegyophi.app",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "9-gyo-phi \u00b7 Your listening room",
+        "width": 1340,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": [],
+    "shortDescription": "A private listening library for PDFs, notes, and ideas",
+    "category": "Productivity"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+.venv/
+src-tauri/target/
+work/
+.coverage
+.pytest_cache/
+__pycache__/
+.DS_Store
