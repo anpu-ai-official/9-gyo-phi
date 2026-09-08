@@ -1,4 +1,4 @@
-name: Build macOS release
+name: Build desktop release
 
 on:
   workflow_dispatch:
@@ -14,42 +14,101 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  macos-arm64:
-    name: Apple Silicon bundle
-    runs-on: macos-15
-    timeout-minutes: 120
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            native_arch: arm64
+            config: src-tauri/tauri.macos-arm64.conf.json
+            artifact: 9-gyo-phi-macos-arm64
+            paths: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: macOS Intel
+            runner: macos-15
+            target: x86_64-apple-darwin
+            native_arch: x86_64
+            config: src-tauri/tauri.macos-x64.conf.json
+            artifact: 9-gyo-phi-macos-x64
+            paths: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            native_arch: x86_64
+            config: src-tauri/tauri.windows.conf.json
+            artifact: 9-gyo-phi-windows-x64
+            paths: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          - name: Linux x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            native_arch: x86_64
+            config: src-tauri/tauri.linux.conf.json
+            artifact: 9-gyo-phi-linux-x64
+            paths: |
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      NATIVE_TARGET_ARCH: arm64
+      NATIVE_TARGET_ARCH: ${{ matrix.native_arch }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: rustup target add aarch64-apple-darwin
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+          patchelf libssl-dev ninja-build
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
       - run: npm ci
       - run: npm run check
       - name: Restore native engine
         id: native-engine-cache
         uses: actions/cache@v6
         with:
-          path: src-tauri/binaries/llama-server-aarch64-apple-darwin
-          key: llama-server-${{ runner.os }}-${{ runner.arch }}-9113cc1880763bf590774490f51a661bf22403a4-ninja-v1
+          path: src-tauri/binaries/llama-server-*
+          key: llama-server-${{ matrix.target }}-9113cc1880763bf590774490f51a661bf22403a4-v3
       - name: Build native engine
         if: steps.native-engine-cache.outputs.cache-hit != 'true'
         run: npm run build:native-engine
-      - run: npx tauri build --target aarch64-apple-darwin
+      - name: Build desktop bundle
+        run: npx tauri build --target ${{ matrix.target }} --config ${{ matrix.config }}
       - uses: actions/upload-artifact@v7
         with:
-          name: 9-gyo-phi-macos-arm64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.paths }}
           if-no-files-found: error
+
+  release:
+    name: Assemble draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum ./* > SHA256SUMS
       - name: Create draft GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${GITHUB_REF_NAME}"
-          src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          artifacts/*
+          --repo "${GITHUB_REPOSITORY}"
           --draft --generate-notes --title "9-gyo-φ ${GITHUB_REF_NAME}"

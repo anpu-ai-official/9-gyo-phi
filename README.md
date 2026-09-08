@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/anpu-ai-official/9-gyo-phi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/anpu-ai-official/9-gyo-phi/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-45183F.svg"></a>
-  <img alt="Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-45183F.svg">
+  <img alt="Desktop targets" src="https://img.shields.io/badge/desktop-macOS%20%7C%20Windows%20%7C%20Linux-45183F.svg">
   <img alt="Local first" src="https://img.shields.io/badge/privacy-local--first-6B315E.svg">
 </p>
 
@@ -30,15 +30,15 @@
 
 Most read-aloud tools treat a document as plain prose. 9-gyo-φ preserves the original book while preparing a separate listening version that understands code, notation, dates, measurements, links, abbreviations, and structured steps.
 
-Everything important happens on your Mac:
+Everything important happens on your device:
 
 - no account, subscription, analytics, advertising, or document-processing cloud;
-- native Qwen speech preparation through llama.cpp and Metal;
+- native Qwen speech preparation through a pinned llama.cpp sidecar;
 - native Kokoro narration through Rust and quantized ONNX Runtime;
 - deterministic speech rules whenever the local LLM is unavailable;
 - complete local M4B creation with an integrated position-saving player.
 
-The project currently targets Apple Silicon macOS 13 or newer. A browser preview is available for interface development and basic listening.
+Apple Silicon macOS is the currently verified desktop release. Intel macOS, Windows x64, and Linux x64 build candidates are exercised by the repository's platform matrix and graduate to supported status only after signed installers and real-model smoke tests pass. See the [platform support contract](docs/platform-support.md).
 
 ## Highlights
 
@@ -77,9 +77,9 @@ npm start
 
 Open `http://127.0.0.1:8766`. The preview server binds only to loopback. It uses deterministic speech preparation and a Kokoro WebAssembly worker; native Qwen and M4B creation are desktop-only.
 
-### Native macOS app
+### Native desktop app
 
-Install stable Rust, CMake, and the Xcode command-line tools, then:
+Install stable Rust, CMake, and the platform prerequisites in the [contribution guide](CONTRIBUTING.md), then:
 
 ```sh
 npm ci
@@ -87,12 +87,12 @@ npm run verify
 npm run build
 ```
 
-The Apple Silicon app and DMG are written under `src-tauri/target/release/bundle/`. The first production build compiles a pinned, static llama.cpp sidecar. Model weights are not embedded in the app:
+Platform installers are written under `src-tauri/target/release/bundle/`. The first production build compiles a pinned, static llama.cpp sidecar for the current target. Model weights are not embedded in the app:
 
 - Qwen 2.5 Coder 3B Q4_K_M: approximately 2.1 GB, installed explicitly from **Local model**;
 - quantized Kokoro plus five voices: approximately 100 MB, installed on first Kokoro use.
 
-Downloads use fixed upstream URLs and SHA-256 verification. Public distribution additionally requires the product owner's Apple Developer ID signing and notarization credentials.
+Downloads use fixed upstream URLs and SHA-256 verification. Public distribution additionally requires platform signing credentials; unsigned cross-platform builds remain release candidates rather than supported releases.
 
 ## How it works
 
@@ -135,7 +135,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the review standard, [SECURITY.md](SE
 
 ## Project status
 
-9-gyo-φ is a pre-1.0 project. The Apple Silicon build, EPUB-to-M4B path, local models, deterministic tests, and packaged application have been exercised end-to-end. Signed/notarized public installers, Intel macOS support, OCR, cloud sync, and additional desktop platforms are not claimed yet.
+9-gyo-φ is a pre-1.0 project. The Apple Silicon build, EPUB-to-M4B path, local models, deterministic tests, and packaged application have been exercised end-to-end. Cross-platform Rust services and packaging targets exist for Intel macOS, Windows x64, and Linux x64; the support table records exactly which combinations have passed real hardware, signing, and installer validation.
 
 Current direction lives in [ROADMAP.md](ROADMAP.md). Release notes live in [CHANGELOG.md](CHANGELOG.md). Brand usage and production assets are documented in [docs/brand-assets.md](docs/brand-assets.md).
 

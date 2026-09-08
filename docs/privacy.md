@@ -32,7 +32,7 @@ Document text is not sent to the model hosts. Downloads contain ordinary HTTP me
 
 ## Deletion and backups
 
-Recently deleted documents are recoverable inside the app. Removing application data through macOS or browser settings can permanently remove the library, models, and audiobooks. Export a library backup and original documents before clearing application data.
+Recently deleted documents are recoverable inside the app. Removing application data through operating-system or browser settings can permanently remove the library, models, and audiobooks. Export a library backup and original documents before clearing application data.
 
 Backups are unencrypted JSON and may contain complete documents and notes. Store them with the same care as the source material.
 

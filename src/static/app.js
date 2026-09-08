@@ -156,6 +156,13 @@ let settings = {
   llm: true,
 };
 let systemVoices = [],
+  platformCapabilities = {
+    os: "browser",
+    arch: "web",
+    llmAcceleration: "Browser fallback",
+    systemSpeech: Boolean(window.speechSynthesis),
+    audiobookEncoder: "Desktop only",
+  },
   busyImport = false,
   currentIsDraft = false;
 const player = new Player(updatePlayer);
@@ -1789,7 +1796,22 @@ async function loadVoices() {
   );
   if (!settings.voice && systemVoices.some((v) => v.name === "Samantha"))
     settings.voice = "Samantha";
+  if (!systemVoices.length && settings.engine === "system") {
+    settings.engine = "neural";
+    settings.voice = "af_heart";
+  }
   updateVoiceLabel();
+}
+
+async function loadPlatformCapabilities() {
+  if (!window.__TAURI__?.core) return;
+  try {
+    platformCapabilities = await window.__TAURI__.core.invoke(
+      "platform_capabilities",
+    );
+  } catch {
+    // Older development shells keep the conservative browser defaults.
+  }
 }
 function updateVoiceLabel() {
   $("voiceName").textContent =
@@ -1801,7 +1823,7 @@ async function showSettings() {
   await loadVoices();
   dialog(
     "A voice that feels right.",
-    `<p class="dialog-copy">Choose your listening companion. Everything runs locally without Python.</p><label class="dialog-field">Speech engine<select id="engineSelect"><option value="system">System · built into your device</option><option value="neural">Kokoro · local neural voice</option></select></label><p class="hint" id="engineHint"></p><label class="dialog-field">Voice<select id="voiceSelect"></select></label><label class="dialog-field">Playback speed<select id="settingsSpeed">${[0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => `<option value="${speed}">${speed}×${speed === 1 ? " · natural pace" : ""}</option>`).join("")}</select></label><div class="label-row"><label for="settingsSmart">Prepare text for natural speech</label><input id="settingsSmart" type="checkbox" class="switch"></div><p class="hint">Makes code, notation, abbreviations, measurements, links, and other written forms easier to hear. Original documents are always preserved.</p><div class="label-row"><label for="settingsLlm">Use native local LLM to prepare speech</label><input id="settingsLlm" type="checkbox" class="switch"></div><p class="hint">Enabled by default for every passage and every voice. A compact llama.cpp model runs with Metal and rules provide the fallback.</p><div class="dialog-actions"><button class="secondary" id="localModels">Local model</button><button class="secondary" id="showWelcomeAgain">Quick tour</button><button class="primary" id="applySettings">Save preferences</button></div>`,
+    `<p class="dialog-copy">Choose your listening companion. Everything runs locally without Python.</p><label class="dialog-field">Speech engine<select id="engineSelect"><option value="system" ${systemVoices.length ? "" : "disabled"}>System · built into your device${systemVoices.length ? "" : " · unavailable"}</option><option value="neural">Kokoro · local neural voice</option></select></label><p class="hint" id="engineHint"></p><label class="dialog-field">Voice<select id="voiceSelect"></select></label><label class="dialog-field">Playback speed<select id="settingsSpeed">${[0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => `<option value="${speed}">${speed}×${speed === 1 ? " · natural pace" : ""}</option>`).join("")}</select></label><div class="label-row"><label for="settingsSmart">Prepare text for natural speech</label><input id="settingsSmart" type="checkbox" class="switch"></div><p class="hint">Makes code, notation, abbreviations, measurements, links, and other written forms easier to hear. Original documents are always preserved.</p><div class="label-row"><label for="settingsLlm">Use native local LLM to prepare speech</label><input id="settingsLlm" type="checkbox" class="switch"></div><p class="hint">Enabled by default for every passage and every voice. A compact llama.cpp model uses ${escape(platformCapabilities.llmAcceleration)} acceleration with faithful rules as the fallback.</p><div class="dialog-actions"><button class="secondary" id="localModels">Local model</button><button class="secondary" id="showWelcomeAgain">Quick tour</button><button class="primary" id="applySettings">Save preferences</button></div>`,
     "MADE FOR YOUR EARS",
   );
   document.querySelector('label[for="settingsLlm"]').textContent =
@@ -1837,7 +1859,7 @@ async function showSettings() {
     $("engineHint").textContent = neural
       ? "First play downloads the quantized Kokoro model. Desktop inference then runs in native Rust without Python; browser preview uses a worker."
       : window.__TAURI__?.core
-        ? "Native macOS audio supports WAV export. No model download is needed."
+        ? `Native ${platformCapabilities.os} audio is ready. No model download is needed.`
         : "Browser system speech is ready to use. Offline availability depends on installed system voices.";
   };
   populate();
@@ -2605,7 +2627,7 @@ window.addEventListener("drop", (event) => {
 window.addEventListener("offline", () => {
   $("connectionLabel").textContent = "Offline. Your library is here.";
   toast(
-    "You’re offline. Saved documents and installed system voices remain available.",
+    "You’re offline. Saved documents and installed local voices remain available.",
   );
 });
 window.addEventListener("online", () => {
@@ -2630,6 +2652,7 @@ async function initialize() {
   $("documentGrid").innerHTML =
     '<div class="loading-grid"></div><div class="loading-grid"></div><div class="loading-grid"></div>';
   try {
+    await loadPlatformCapabilities();
     const [storedDocs, storedDraft, preferences, onboarded] = await Promise.all(
       [
         listDocuments(),
@@ -2694,7 +2717,7 @@ initialize();
 async function showModels() {
   dialog(
     "Local speech model",
-    `<p class="dialog-copy">Qwen runs through a small native llama.cpp binary with Metal acceleration. Python is not installed or started.</p><p class="dialog-status" id="modelStatus">Checking local model…</p><div id="modelRows"></div><div class="dialog-actions"><button class="secondary" id="retryModels">Refresh</button><button class="primary" id="backToVoices">Voice preferences</button></div>`,
+    `<p class="dialog-copy">Qwen runs through a small native llama.cpp binary using the best packaged backend for this device. Python is not installed or started.</p><p class="dialog-status" id="modelStatus">Checking local model…</p><div id="modelRows"></div><div class="dialog-actions"><button class="secondary" id="retryModels">Refresh</button><button class="primary" id="backToVoices">Voice preferences</button></div>`,
   );
   $("retryModels").onclick = () => showModels().catch(report);
   $("backToVoices").onclick = () => showSettings().catch(report);
@@ -2711,7 +2734,7 @@ async function showModels() {
         : "Installed · starting automatically when needed."
       : "Optional model download · about 2.1 GB.";
     $("modelRows").innerHTML =
-      `<div class="model-row"><strong>${escape(data.modelName)}</strong><p class="hint">Deterministic Q4 speech preparation on Apple Silicon Metal. Original passages remain unchanged.</p><div class="model-actions"><small>${data.installed ? `Installed · ${(data.size / 1024 / 1024 / 1024).toFixed(1)} GB` : "Not installed"}</small>${data.installed ? '<span class="status-tag">Installed</span>' : '<button class="secondary" id="downloadNativeLlm">Download</button>'}</div></div>`;
+      `<div class="model-row"><strong>${escape(data.modelName)}</strong><p class="hint">Deterministic Q4 speech preparation with ${escape(data.acceleration || platformCapabilities.llmAcceleration)} acceleration on ${escape(platformCapabilities.os)} ${escape(platformCapabilities.arch)}. Original passages remain unchanged.</p><div class="model-actions"><small>${data.installed ? `Installed · ${(data.size / 1024 / 1024 / 1024).toFixed(1)} GB` : "Not installed"}</small>${data.installed ? '<span class="status-tag">Installed</span>' : '<button class="secondary" id="downloadNativeLlm">Download</button>'}</div></div>`;
     if ($("downloadNativeLlm"))
       $("downloadNativeLlm").onclick = () => startModelDownload().catch(report);
   } catch (error) {

@@ -6,10 +6,14 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+
+mod audiobook;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct VoiceInfo {
@@ -105,92 +109,26 @@ fn append_audiobook_pcm(
         .map_err(|_| "The audiobook audio could not be saved.".to_string())
 }
 
-fn pcm_to_wav(raw_path: &std::path::Path, wav_path: &std::path::Path) -> Result<u64, String> {
-    let data_size = std::fs::metadata(raw_path)
-        .map_err(|_| "The audiobook recording is missing.".to_string())?
-        .len();
-    let data_size_u32 = u32::try_from(data_size)
-        .map_err(|_| "This audiobook exceeds the WAV encoding limit.".to_string())?;
-    let mut output = File::create(wav_path)
-        .map_err(|_| "The audiobook WAV could not be created.".to_string())?;
-    output
-        .write_all(b"RIFF")
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&(36_u32 + data_size_u32).to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(b"WAVEfmt ")
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&16_u32.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&1_u16.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&1_u16.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&24_000_u32.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&48_000_u32.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&2_u16.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&16_u16.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(b"data")
-        .map_err(|error| error.to_string())?;
-    output
-        .write_all(&data_size_u32.to_le_bytes())
-        .map_err(|error| error.to_string())?;
-    let mut input = File::open(raw_path).map_err(|error| error.to_string())?;
-    std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
-    Ok(data_size)
-}
-
 #[tauri::command]
 async fn finish_audiobook(app: tauri::AppHandle, id: String) -> Result<AudiobookResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (raw, final_path) = audiobook_paths(&app, &id)?;
-        let wav = raw.with_extension("wav");
         let temporary = raw.with_extension("m4b");
-        let data_size = pcm_to_wav(&raw, &wav)?;
-        if data_size == 0 {
-            let _ = std::fs::remove_file(&raw);
-            let _ = std::fs::remove_file(&wav);
-            return Err("The audiobook contains no audio.".to_string());
-        }
-        let result = Command::new("/usr/bin/afconvert")
-            .arg(&wav)
-            .arg("-o")
-            .arg(&temporary)
-            .args([
-                "-f",
-                "m4bf",
-                "-d",
-                "aac ",
-                "-b",
-                "64000",
-                "--soundcheck-generate",
-                "--media-kind",
-                "Audiobook",
-            ])
-            .output()
-            .map_err(|_| "The macOS audiobook encoder could not start.".to_string())?;
+        let result = audiobook::encode_m4b(&raw, &temporary);
         let _ = std::fs::remove_file(&raw);
-        let _ = std::fs::remove_file(&wav);
-        if !result.status.success() {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(format!(
-                "M4B encoding failed: {}",
-                String::from_utf8_lossy(&result.stderr).trim()
-            ));
+        let data_size = match result {
+            Ok(size) => size,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+        };
+        if temporary == final_path {
+            return Err("The audiobook staging path is invalid.".to_string());
+        }
+        if final_path.exists() {
+            std::fs::remove_file(&final_path)
+                .map_err(|_| "The previous audiobook could not be replaced.".to_string())?;
         }
         std::fs::rename(&temporary, &final_path)
             .map_err(|_| "The finished audiobook could not be stored.".to_string())?;
@@ -524,6 +462,17 @@ struct NativeLlmStatus {
     running: bool,
     size: u64,
     model_name: &'static str,
+    acceleration: &'static str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    os: &'static str,
+    arch: &'static str,
+    llm_acceleration: &'static str,
+    system_speech: bool,
+    audiobook_encoder: &'static str,
 }
 
 #[derive(serde::Serialize)]
@@ -539,14 +488,50 @@ fn native_llm_model_path(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 fn native_llm_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let packaged = app.path().resource_dir().ok()?.join(NATIVE_LLM_EXE_NAME);
+    let packaged = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join(native_llm_resource_name());
     if packaged.is_file() {
         return Some(packaged);
     }
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
-        .join("llama-server-aarch64-apple-darwin");
+        .join(native_llm_development_name());
     development.is_file().then_some(development)
+}
+
+fn native_llm_resource_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "llama-server.exe"
+    } else {
+        NATIVE_LLM_EXE_NAME
+    }
+}
+
+fn native_llm_development_name() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "llama-server-aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "llama-server-x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "llama-server-x86_64-pc-windows-msvc.exe"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "llama-server-x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "llama-server-aarch64-unknown-linux-gnu"
+    } else {
+        "llama-server-unsupported-target"
+    }
+}
+
+fn native_llm_acceleration() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "Metal"
+    } else {
+        "CPU"
+    }
 }
 
 fn spawn_native_llm(app: &tauri::AppHandle) -> Option<Child> {
@@ -559,23 +544,21 @@ fn spawn_native_llm(app: &tauri::AppHandle) -> Option<Child> {
         return None;
     }
     log::info!("Starting native llama.cpp speech engine.");
-    Command::new(executable)
-        .arg("--model")
-        .arg(model)
-        .args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8765",
-            "--ctx-size",
-            "4096",
-            "--n-gpu-layers",
-            "99",
-            "--jinja",
-            "--no-webui",
-        ])
-        .spawn()
-        .ok()
+    let mut command = Command::new(executable);
+    command.arg("--model").arg(model).args([
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--ctx-size",
+        "4096",
+        "--jinja",
+        "--no-webui",
+    ]);
+    if native_llm_acceleration() != "CPU" {
+        command.args(["--n-gpu-layers", "99"]);
+    }
+    command.spawn().ok()
 }
 
 #[tauri::command]
@@ -591,6 +574,18 @@ fn native_llm_status(app: tauri::AppHandle) -> NativeLlmStatus {
         running: is_server_alive(ENGINE_PORT),
         size,
         model_name: "Qwen2.5-Coder-3B Q4_K_M",
+        acceleration: native_llm_acceleration(),
+    }
+}
+
+#[tauri::command]
+fn platform_capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        llm_acceleration: native_llm_acceleration(),
+        system_speech: cfg!(any(target_os = "macos", target_os = "windows")),
+        audiobook_encoder: "Pure Rust AAC",
     }
 }
 
@@ -1064,6 +1059,7 @@ async fn synthesize_kokoro_speech(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn collect_system_voices() -> Vec<VoiceInfo> {
     let mut voices = Vec::new();
 
@@ -1112,6 +1108,166 @@ fn collect_system_voices() -> Vec<VoiceInfo> {
     voices
 }
 
+#[cfg(target_os = "windows")]
+fn collect_system_voices() -> Vec<VoiceInfo> {
+    let script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Speech
+$speaker = [System.Speech.Synthesis.SpeechSynthesizer]::new()
+$voices = @($speaker.GetInstalledVoices() | ForEach-Object {
+  [PSCustomObject]@{
+    name = $_.VoiceInfo.Name
+    lang = $_.VoiceInfo.Culture.Name
+    sample = "Installed Windows voice"
+  }
+})
+ConvertTo-Json -InputObject $voices -Compress
+"#;
+    Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|json| serde_json::from_str(json.trim_start_matches('\u{feff}').trim()).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn collect_system_voices() -> Vec<VoiceInfo> {
+    Vec::new()
+}
+
+fn wav_data_size(bytes: &[u8]) -> usize {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return bytes.len().saturating_sub(44);
+    }
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if &bytes[offset..offset + 4] == b"data" {
+            return size.min(bytes.len().saturating_sub(offset + 8));
+        }
+        offset = offset.saturating_add(8 + size + (size % 2));
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn run_system_speech(
+    text: &str,
+    voice: Option<&str>,
+    rate: Option<u32>,
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    let mut command = Command::new("/usr/bin/say");
+    if let Some(voice) = voice {
+        if !voice.is_empty()
+            && voice != "default"
+            && !voice.starts_with("af_")
+            && !voice.starts_with("am_")
+            && !voice.starts_with("bf_")
+            && !voice.starts_with("bm_")
+        {
+            command.arg("-v").arg(voice);
+        }
+    }
+    if let Some(rate) = rate {
+        command.arg("-r").arg(rate.to_string());
+    }
+    let output = command
+        .arg("-o")
+        .arg(output_path)
+        .arg("--data-format=LEI16@24000")
+        .arg("--")
+        .arg(text)
+        .output()
+        .map_err(|error| format!("Failed to run the macOS speech engine: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Speech synthesis failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_system_speech(
+    text: &str,
+    voice: Option<&str>,
+    rate: Option<u32>,
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    let sapi_rate = rate
+        .map(|words| ((words as i32 - 180) / 18).clamp(-10, 10))
+        .unwrap_or(0);
+    let script = r#"
+Add-Type -AssemblyName System.Speech
+$speaker = [System.Speech.Synthesis.SpeechSynthesizer]::new()
+if ($args[0] -and $args[0] -ne "default") { $speaker.SelectVoice($args[0]) }
+$speaker.Rate = [int]$args[2]
+$format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(
+  24000,
+  [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,
+  [System.Speech.AudioFormat.AudioChannel]::Mono
+)
+$speaker.SetOutputToWaveFile($args[1], $format)
+$speaker.Speak([Console]::In.ReadToEnd())
+$speaker.Dispose()
+"#;
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .arg(voice.unwrap_or("default"))
+        .arg(output_path)
+        .arg(sapi_rate.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to run the Windows speech engine: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "The Windows speech engine input is unavailable.".to_string())?
+        .write_all(text.as_bytes())
+        .map_err(|_| "The Windows speech engine could not receive text.".to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| "The Windows speech engine stopped unexpectedly.".to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Speech synthesis failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn run_system_speech(
+    _text: &str,
+    _voice: Option<&str>,
+    _rate: Option<u32>,
+    _output_path: &std::path::Path,
+) -> Result<(), String> {
+    Err("No supported system voice is installed. Choose Kokoro instead.".to_string())
+}
+
 fn generate_native_speech(
     text: String,
     voice: Option<String>,
@@ -1134,44 +1290,16 @@ fn generate_native_speech(
         .as_nanos();
     let temp_file = std::env::temp_dir().join(format!("9_gyo_phi_{}.wav", timestamp));
 
-    let mut cmd = Command::new("/usr/bin/say");
-    if let Some(v) = &voice {
-        if !v.is_empty()
-            && v != "default"
-            && !v.starts_with("af_")
-            && !v.starts_with("am_")
-            && !v.starts_with("bf_")
-            && !v.starts_with("bm_")
-        {
-            cmd.arg("-v").arg(v);
-        }
-    }
-    if let Some(r) = rate {
-        cmd.arg("-r").arg(r.to_string());
-    }
-    cmd.arg("-o").arg(&temp_file);
-    cmd.arg("--data-format=LEI16@24000");
-    cmd.arg("--").arg(trimmed);
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run say command: {}", e))?;
-
-    if !output.status.success() {
+    if let Err(error) = run_system_speech(trimmed, voice.as_deref(), rate, &temp_file) {
         let _ = std::fs::remove_file(&temp_file);
-        let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Speech synthesis failed: {}", err_msg));
+        return Err(error);
     }
 
     let wav_bytes =
         std::fs::read(&temp_file).map_err(|e| format!("Failed to read generated wav: {}", e))?;
     let _ = std::fs::remove_file(&temp_file);
 
-    let pcm_bytes = if wav_bytes.len() > 44 {
-        wav_bytes.len() - 44
-    } else {
-        0
-    };
+    let pcm_bytes = wav_data_size(&wav_bytes);
     let duration = (pcm_bytes as f64) / 48000.0;
     let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
 
@@ -1253,6 +1381,7 @@ pub fn run() {
             cancel_audiobook,
             get_audiobook_path,
             native_llm_status,
+            platform_capabilities,
             download_native_llm,
             cancel_native_llm_download,
             prepare_speech_native,
@@ -1293,22 +1422,25 @@ mod tests {
     }
 
     #[test]
-    fn pcm_writer_creates_a_valid_24khz_wav() {
-        let unique = std::process::id();
-        let raw = std::env::temp_dir().join(format!("9-gyo-phi-{unique}.pcm"));
-        let wav = std::env::temp_dir().join(format!("9-gyo-phi-{unique}.wav"));
-        std::fs::write(&raw, [0_u8, 0, 255, 127]).unwrap();
-        assert_eq!(pcm_to_wav(&raw, &wav).unwrap(), 4);
-        let bytes = std::fs::read(&wav).unwrap();
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(
-            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
-            24_000
-        );
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
-        let _ = std::fs::remove_file(raw);
-        let _ = std::fs::remove_file(wav);
+    fn wav_parser_finds_data_after_non_audio_chunks() {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&40_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEJUNK");
+        wav.extend_from_slice(&3_u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 2, 3, 0]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(&[0, 0, 1, 0]);
+        assert_eq!(wav_data_size(&wav), 4);
+    }
+
+    #[test]
+    fn native_engine_name_matches_the_compiling_target() {
+        let name = native_llm_development_name();
+        assert!(name.starts_with("llama-server-"));
+        if cfg!(target_os = "windows") {
+            assert!(name.ends_with(".exe"));
+        }
     }
 
     #[test]

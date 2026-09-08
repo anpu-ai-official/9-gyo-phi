@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "9-gyo-phi",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "identifier": "com.ninegyophi.app",
   "build": {
     "frontendDist": "../src"
@@ -36,9 +36,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns"
     ],
-    "resources": {
-      "binaries/llama-server-aarch64-apple-darwin": "llama-server"
-    },
     "shortDescription": "A private, local-first document reader and audiobook studio",
     "category": "Productivity"
   }

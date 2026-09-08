@@ -9,6 +9,8 @@ The roadmap describes direction, not promised dates. Privacy, accessibility, lis
 - Improve native-model download recovery and progress visibility.
 - Validate long-book M4B generation, cancellation, and disk-pressure behavior.
 - Establish signed and notarized macOS releases.
+- Exercise Intel macOS, Windows x64, and Linux x64 artifacts through the native-model and M4B smoke suites.
+- Add Windows signing and Linux package signatures before promoting cross-platform installers from release candidates.
 
 ## Next
 
@@ -17,11 +19,11 @@ The roadmap describes direction, not promised dates. Privacy, accessibility, lis
 - Better EPUB navigation, footnotes, tables, and pronunciation controls.
 - Import diagnostics that explain reading-order decisions without exposing content.
 - Performance profiling on additional Apple Silicon generations.
-- Reproducible Intel macOS evaluation before claiming support.
+- Optional Vulkan acceleration for Windows and Linux while preserving CPU fallback.
 
 ## Later
 
-- Additional native desktop platforms when privacy and packaging guarantees match macOS.
+- Windows ARM64 and Linux ARM64 after the Tier-1 desktop support contract is met.
 - Pluggable local speech and language models with verified manifests.
 - Optional encrypted library backups.
 - A stable extension interface for importers and narration transforms.

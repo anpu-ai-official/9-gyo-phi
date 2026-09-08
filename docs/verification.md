@@ -13,20 +13,20 @@
 
 ## Native architecture
 
-| Capability         | Runtime                                         | Model storage                                                                    |
-| ------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------- |
-| Speech preparation | Bundled 14 MB llama.cpp server with Metal       | SHA-256-verified Qwen 2.5 Coder 3B Q4_K_M GGUF in application data               |
-| Neural narration   | Native Rust `kokoro-en` with ONNX Runtime       | SHA-256-verified quantized Kokoro model and five voice packs in application data |
-| Audiobook encoding | Rust PCM stream plus macOS `afconvert`          | M4B in application data                                                          |
-| Document import    | PDF.js and local EPUB/HTML/Markdown/TXT parsing | IndexedDB, with original bytes retained                                          |
+| Capability         | Runtime                                                   | Model storage                                                                    |
+| ------------------ | --------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Speech preparation | Target-specific llama.cpp; Metal or portable CPU baseline | SHA-256-verified Qwen 2.5 Coder 3B Q4_K_M GGUF in application data               |
+| Neural narration   | Native Rust `kokoro-en` with ONNX Runtime                 | SHA-256-verified quantized Kokoro model and five voice packs in application data |
+| Audiobook encoding | Streaming pure-Rust AAC and MP4/M4B muxing                | M4B in application data                                                          |
+| Document import    | PDF.js and local EPUB/HTML/Markdown/TXT parsing           | IndexedDB, with original bytes retained                                          |
 
 ## Verification
 
-- 52 deterministic frontend tests pass.
-- Three regular Rust tests pass; the real-model Rust test is opt-in.
+- 56 deterministic frontend tests pass.
+- Six regular Rust tests pass; the real-model Rust test is opt-in.
 - Ten real Qwen speech-contract cases pass with deterministic decoding.
 - Real native Kokoro produces non-silent 24 kHz PCM.
 - Packaged EPUB import produced the expected two passages.
-- Packaged EPUB-to-M4B completed end-to-end; `afinfo` identified `m4bf`, mono 24 kHz AAC, 4.39 seconds.
+- The portable audiobook test writes a 24 kHz mono AAC M4B without external tools, reopens it through an independent demux path, verifies its codec, rate, channels, packets, and bounded output, and passes the macOS system decoder's `afinfo` inspection.
 - Rust formatting and strict Clippy checks pass.
 - Current packaged size is 93 MB for the app and 32 MB for the DMG; model weights are separate.

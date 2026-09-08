@@ -6,7 +6,8 @@
 - **kokoro-en 0.1.5**: Apache License 2.0. The pinned Rust runtime provides native desktop Kokoro inference.
 - **ONNX Runtime**: MIT License. Used by the native Kokoro runtime.
 - **fflate 0.8.3**: MIT License. The vendored browser build extracts EPUB containers locally.
-- **llama.cpp**: MIT License. A pinned native arm64 build provides Metal-accelerated GGUF inference without Python.
+- **llama.cpp**: MIT License. Pinned target-specific native builds provide GGUF inference without Python.
+- **OxideAV AAC, MP4, and core crates**: MIT License. These pure-Rust components encode bounded PCM frames to AAC and assemble local M4B audiobooks without an external multimedia runtime.
 - **Tauri and its CLI**: Apache-2.0 OR MIT. Rust/JavaScript dependency versions are recorded in the lockfiles.
 - **Model weights and voice embeddings**: their upstream model distribution terms apply independently. Five Kokoro browser voice embeddings are vendored; native Kokoro and Qwen model assets are downloaded and verified at runtime.
 

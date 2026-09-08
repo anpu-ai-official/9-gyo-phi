@@ -4,10 +4,19 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## [Unreleased]
 
-### Planned
+## [0.4.0] - 2026-09-09
 
-- Signed and notarized public macOS releases.
-- Broader long-document and accessibility testing.
+### Added
+
+- Target-specific llama.cpp build and packaging paths for Intel macOS, Windows x64, and Linux x64, with portable CPU inference as the non-Metal baseline.
+- Windows installed-voice discovery and offline SAPI synthesis.
+- A macOS, Windows, and Linux CI/release matrix with a single gated release-assembly job and generated checksums.
+- An explicit platform support contract that separates successful builds from supported releases.
+
+### Changed
+
+- Replaced the macOS-only `afconvert` audiobook boundary with bounded, pure-Rust AAC and M4B generation.
+- Made model and voice settings describe the actual operating system, architecture, and acceleration backend.
 
 ## [0.3.1] - 2026-09-09
 
@@ -54,7 +63,8 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 - Initial local document reader and speech prototype.
 
-[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.1.0...v0.2.0

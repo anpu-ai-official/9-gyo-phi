@@ -30,16 +30,27 @@ jobs:
       - run: npm audit --audit-level=moderate
 
   rust:
-    name: Native · Rust stable
-    runs-on: macos-15
-    timeout-minutes: 30
+    name: Native · ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            runner: macos-15
+          - name: Windows x64
+            runner: windows-2025
+          - name: Linux x64
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - name: Create non-executed sidecar fixture
-        run: |
-          mkdir -p src-tauri/binaries
-          printf '#!/bin/sh\nexit 1\n' > src-tauri/binaries/llama-server-aarch64-apple-darwin
-          chmod +x src-tauri/binaries/llama-server-aarch64-apple-darwin
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+          patchelf libssl-dev
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml

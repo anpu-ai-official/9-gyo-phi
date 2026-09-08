@@ -11,7 +11,7 @@ Thank you for helping build a calmer, more private way to listen to documents. C
 
 ## Development setup
 
-The browser preview works with Node.js 22 LTS or Node.js 24 and newer. Native development currently targets Apple Silicon macOS 13 or newer.
+The browser preview works with Node.js 22 LTS or Node.js 24 and newer. Native development targets macOS, Windows, and Linux. Install stable Rust and CMake plus Xcode command-line tools on macOS, Visual Studio 2022 with Desktop development with C++ on Windows, or WebKitGTK 4.1 development packages on Linux.
 
 ```sh
 git clone https://github.com/anpu-ai-official/9-gyo-phi.git
@@ -20,13 +20,13 @@ npm ci
 npm start
 ```
 
-For the desktop app, install stable Rust, CMake, and the Xcode command-line tools, then run:
+For the desktop app, run:
 
 ```sh
 npm run dev
 ```
 
-The first production build compiles a pinned llama.cpp sidecar. Model weights are downloaded at runtime and are never stored in Git.
+The first production build compiles a pinned llama.cpp sidecar for the current target. Model weights are downloaded at runtime and are never stored in Git. CPU inference is the portable baseline; Apple Silicon additionally uses Metal.
 
 ## Quality bar
 

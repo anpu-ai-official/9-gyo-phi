@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "targets": ["dmg"],
+    "resources": {
+      "binaries/llama-server-x86_64-apple-darwin": "llama-server"
+    }
+  }
+}

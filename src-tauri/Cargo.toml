@@ -1,6 +1,6 @@
 [package]
 name = "nine-gyo-phi"
-version = "0.3.1"
+version = "0.4.0"
 description = "A private, local-first document reader and audiobook studio"
 authors = ["9-gyo-phi contributors"]
 license = "MIT"
@@ -27,3 +27,6 @@ url = "2.5"
 sha2 = "0.11"
 kokoro-en = { git = "https://github.com/pguso/kokoro.git", rev = "b42bd5cf915163607cb51984cabf273dcf09755e", default-features = false, features = ["misaki-lean"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+oxideav-aac = "0.1.7"
+oxideav-core = "0.1"
+oxideav-mp4 = "0.0.10"
