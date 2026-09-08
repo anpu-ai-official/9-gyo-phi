@@ -13,7 +13,7 @@
 | Windows ARM64   |   Planned    |     —      |      —       |      —       |       —       | Unsupported                                                 |
 | Linux ARM64     |   Planned    |     —      |      —       |      —       |       —       | Unsupported                                                 |
 
-Kokoro is the consistent default voice. macOS and Windows expose installed operating-system voices when discovery succeeds. Linux uses Kokoro because there is no dependable system-wide voice provider across distributions.
+Kokoro is the consistent default voice and uses a portable ONNX Runtime CPU baseline on every desktop target. macOS and Windows expose installed operating-system voices when discovery succeeds. Linux uses Kokoro because there is no dependable system-wide voice provider across distributions.
 
 ## Release gates
 

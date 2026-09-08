@@ -3,7 +3,7 @@
 - **PDF.js**: Copyright Mozilla Foundation; Apache License 2.0. The bundled `pdf.min.js` and `pdf.worker.min.js` retain their original license headers.
 - **Kokoro.js 1.2.1**: Apache License 2.0. The vendored `src/static/kokoro.web.js` browser runtime was retained from the original repository and adjusted to resolve local voices relative to the module URL.
 - **Transformers.js 3.8.1**: Apache License 2.0. Included inside the vendored browser neural runtime.
-- **kokoro-en 0.1.5**: Apache License 2.0. The pinned Rust runtime provides native desktop Kokoro inference. The maintained packaging fork selects only the execution provider appropriate to each target; its functional source remains the upstream project.
+- **kokoro-en 0.1.5**: Apache License 2.0. The pinned Rust runtime provides native desktop Kokoro inference. The maintained packaging fork pins an ABI-compatible ONNX Runtime CPU baseline across desktop targets; its functional source remains the upstream project.
 - **ONNX Runtime**: MIT License. Used by the native Kokoro runtime.
 - **fflate 0.8.3**: MIT License. The vendored browser build extracts EPUB containers locally.
 - **llama.cpp**: MIT License. Pinned target-specific native builds provide GGUF inference without Python.
