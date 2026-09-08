@@ -48,6 +48,21 @@ export function normalizeListeningUrl(value) {
   if (url.href.length > 4096) throw new Error("This URL is too long.");
   return url.href;
 }
+export function normalizePdfLinkUrl(value) {
+  const input = String(value || "").trim();
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("This PDF link is not a complete web address.");
+  }
+  if (!["https:", "http:", "mailto:"].includes(url.protocol))
+    throw new Error("This PDF link uses an unsupported address type.");
+  if (url.username || url.password)
+    throw new Error("PDF links containing usernames or passwords are blocked.");
+  if (url.href.length > 4096) throw new Error("This PDF link is too long.");
+  return url.href;
+}
 export function decodeUrlSourceEnvelope(value) {
   const bytes =
     value instanceof Uint8Array

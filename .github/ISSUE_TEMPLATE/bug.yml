@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem in 9-gyo-φ.
+title: "[Bug]: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve 9-gyo-φ. Please remove private document content from screenshots and logs.
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I can reproduce this with a document I am allowed to share or describe safely.
+          required: true
+  - type: input
+    attributes:
+      label: Version
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Runtime
+      options:
+        - macOS desktop app
+        - Browser preview
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the expected result and the actual result.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Import ...
+        2. Open ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Environment
+      placeholder: macOS version, Mac model/chip, document format, selected speech engine
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context
+      description: Sanitized logs or screenshots only. Do not attach private books or model files.

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend · Node 22
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run verify:assets
+      - run: npm audit --audit-level=moderate
+
+  rust:
+    name: Native · Rust stable
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create non-executed sidecar fixture
+        run: |
+          mkdir -p src-tauri/binaries
+          printf '#!/bin/sh\nexit 1\n' > src-tauri/binaries/llama-server-aarch64-apple-darwin
+          chmod +x src-tauri/binaries/llama-server-aarch64-apple-darwin
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml

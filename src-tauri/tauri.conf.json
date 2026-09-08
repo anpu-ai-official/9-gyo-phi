@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "9-gyo-phi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.ninegyophi.app",
   "build": {
     "frontendDist": "../src"
@@ -20,7 +20,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/audiobooks/**"]
+      }
     }
   },
   "bundle": {
@@ -33,9 +37,9 @@
       "icons/icon.icns"
     ],
     "resources": {
-      "binaries/9-gyo-phi-engine.zip": "9-gyo-phi-engine.zip"
+      "binaries/llama-server-aarch64-apple-darwin": "llama-server"
     },
-    "shortDescription": "A private listening library for PDFs, notes, and ideas",
+    "shortDescription": "A private, local-first document reader and audiobook studio",
     "category": "Productivity"
   }
 }

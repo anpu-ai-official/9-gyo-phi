@@ -9,9 +9,10 @@
       content="A quiet place for your reading. Turn PDFs, notes, and ideas into audio, privately on your device."
     />
     <title>9-gyo-phi · Your listening library</title>
-    <link rel="icon" href="./static/brand.svg" type="image/svg+xml" />
+    <link rel="icon" href="./static/brand-symbol.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./static/app.css" />
     <script defer src="./static/pdf.min.js"></script>
+    <script defer src="./static/fflate.min.js"></script>
     <script type="module" src="./static/app.js"></script>
   </head>
   <body>
@@ -19,8 +20,13 @@
     <div class="app-shell">
       <aside class="sidebar" aria-label="Main navigation">
         <a href="#library" class="brand"
-          ><img src="./static/brand.svg" width="40" height="40" alt="" /><span
-            >9-gyo-phi<small>THE LISTENING ROOM</small></span
+          ><img
+            src="./static/brand-symbol.svg"
+            width="40"
+            height="40"
+            alt=""
+          /><span class="brand-name"
+            >9-gyo-φ<small>YOUR LISTENING ROOM</small></span
           ></a
         >
         <button class="primary sidebar-add" id="addDocument">
@@ -351,7 +357,8 @@
                 </div>
                 <div class="inspector-section">
                   <div class="label-row">
-                    <label for="smartCode">Speak code naturally</label
+                    <label for="smartCode"
+                      >Prepare text for natural speech</label
                     ><input
                       id="smartCode"
                       type="checkbox"
@@ -360,7 +367,8 @@
                     />
                   </div>
                   <p class="hint">
-                    Local rules turn technical syntax into words.
+                    The local LLM prepares every passage; rules provide a safe
+                    fallback.
                   </p>
                 </div>
                 <div class="inspector-section">

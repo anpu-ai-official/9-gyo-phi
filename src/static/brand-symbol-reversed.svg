@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">9-gyo-phi reversed document and sound mark</title>
+  <defs>
+    <linearGradient id="paper" x1="20" y1="14" x2="236" y2="242" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf7"/>
+      <stop offset="1" stop-color="#eee3d6"/>
+    </linearGradient>
+    <linearGradient id="plum" x1="54" y1="42" x2="201" y2="222" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#63305b"/>
+      <stop offset="1" stop-color="#2b102e"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="48" fill="url(#paper)"/>
+  <path fill="url(#plum)" d="M48 215V115c0-49 36-77 80-77s80 28 80 77v100H48Z"/>
+  <g fill="url(#paper)">
+    <rect x="61" y="124" width="7" height="39" rx="3.5"/>
+    <rect x="76" y="111" width="7" height="64" rx="3.5"/>
+    <rect x="91" y="99" width="7" height="88" rx="3.5"/>
+    <rect x="188" y="124" width="7" height="39" rx="3.5"/>
+    <rect x="173" y="111" width="7" height="64" rx="3.5"/>
+    <rect x="158" y="99" width="7" height="88" rx="3.5"/>
+    <path d="M104 93c0-8 7-13 14-9l10 7c7 4 14 6 21 6h4c6 0 11 5 11 11v79h-60V93Z"/>
+  </g>
+  <g fill="url(#plum)">
+    <rect x="116" y="119" width="36" height="7" rx="3.5"/>
+    <rect x="116" y="140" width="36" height="7" rx="3.5"/>
+    <rect x="116" y="161" width="36" height="7" rx="3.5"/>
+  </g>
+</svg>

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">9-gyo-phi app icon</title>
+  <defs>
+    <radialGradient id="tile" cx="28%" cy="18%" r="105%">
+      <stop stop-color="#754166"/>
+      <stop offset=".47" stop-color="#4a1e45"/>
+      <stop offset="1" stop-color="#27102b"/>
+    </radialGradient>
+    <linearGradient id="cream" x1="300" y1="255" x2="720" y2="780" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf7"/>
+      <stop offset="1" stop-color="#f1e4d5"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="976" height="976" rx="220" fill="url(#tile)"/>
+  <path fill="url(#cream)" d="M197 801V532c0-191 140-303 315-303s315 112 315 303v269H197Z"/>
+  <g fill="url(#tile)">
+    <rect x="250" y="542" width="28" height="126" rx="14"/>
+    <rect x="310" y="498" width="28" height="214" rx="14"/>
+    <rect x="686" y="498" width="28" height="214" rx="14"/>
+    <rect x="746" y="542" width="28" height="126" rx="14"/>
+    <path d="M380 450c0-31 29-50 56-34l40 26c28 18 57 25 88 25h20c25 0 46 21 46 46v199H380V450Z"/>
+  </g>
+  <g fill="url(#cream)">
+    <rect x="430" y="526" width="151" height="26" rx="13"/>
+    <rect x="430" y="594" width="151" height="26" rx="13"/>
+    <rect x="430" y="662" width="151" height="26" rx="13"/>
+  </g>
+</svg>

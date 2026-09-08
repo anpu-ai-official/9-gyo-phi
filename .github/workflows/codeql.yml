@@ -1,0 +1,48 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze · ${{ matrix.language }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            runner: ubuntu-latest
+            build-mode: none
+          - language: rust
+            runner: macos-15
+            build-mode: manual
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Create non-executed sidecar fixture
+        if: matrix.language == 'rust'
+        run: |
+          mkdir -p src-tauri/binaries
+          printf '#!/bin/sh\nexit 1\n' > src-tauri/binaries/llama-server-aarch64-apple-darwin
+          chmod +x src-tauri/binaries/llama-server-aarch64-apple-darwin
+      - name: Build Rust application
+        if: matrix.language == 'rust'
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+      - uses: github/codeql-action/analyze@v4

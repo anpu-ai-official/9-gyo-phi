@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/anpu-ai-official/9-gyo-phi/discussions
+    about: Ask for help or discuss early ideas before opening an issue.
+  - name: Security report
+    url: https://github.com/anpu-ai-official/9-gyo-phi/security/advisories/new
+    about: Privately report a security or privacy vulnerability.

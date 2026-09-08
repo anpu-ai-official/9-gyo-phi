@@ -74,7 +74,7 @@ test("neural playback prepares the next passage while current audio plays", asyn
       : Promise.resolve();
   const playback = player.play(segments, 0, {
     ...options,
-    engine: "mlx",
+    engine: "neural",
   });
   while (!releaseFirst) await Promise.resolve();
   await Promise.resolve();
@@ -84,6 +84,39 @@ test("neural playback prepares the next passage while current audio plays", asyn
   ]);
   releaseFirst();
   await playback;
+});
+test("offline neural synthesis returns PCM without a live audio context", async () => {
+  const OriginalWorker = globalThis.Worker;
+  const OriginalAudioContext = globalThis.AudioContext;
+  globalThis.AudioContext = class {
+    constructor() {
+      assert.fail("Offline audiobook synthesis must not create AudioContext");
+    }
+  };
+  globalThis.Worker = class {
+    postMessage({ id }) {
+      queueMicrotask(() =>
+        this.onmessage({
+          data: { id, audio: new Float32Array([0, 0.5, -0.5]), rate: 24000 },
+        }),
+      );
+    }
+    terminate() {}
+  };
+  try {
+    const player = new Player(() => {});
+    const result = await player.synthesize(
+      "Offline narration",
+      { engine: "neural", voice: "af_heart", speed: 1, offline: true },
+      0,
+    );
+    assert.equal(result.sampleRate, 24000);
+    assert.equal(result.duration, 3 / 24000);
+    assert.deepEqual([...result.getChannelData(0)], [0, 0.5, -0.5]);
+  } finally {
+    globalThis.Worker = OriginalWorker;
+    globalThis.AudioContext = OriginalAudioContext;
+  }
 });
 test("playback awaits an asynchronous code verbalizer", async () => {
   const player = new Player(() => {}),

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">9-gyo-phi document and sound mark</title>
+  <defs>
+    <linearGradient id="plum" x1="32" y1="24" x2="224" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6b315e"/>
+      <stop offset=".54" stop-color="#45183f"/>
+      <stop offset="1" stop-color="#2b102e"/>
+    </linearGradient>
+    <linearGradient id="cream" x1="92" y1="72" x2="170" y2="206" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf7"/>
+      <stop offset="1" stop-color="#f5eadc"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#plum)" d="M29 226V112C29 53 73 22 128 22s99 31 99 90v114H29Z"/>
+  <g fill="url(#cream)">
+    <rect x="45" y="125" width="8" height="45" rx="4"/>
+    <rect x="62" y="110" width="8" height="74" rx="4"/>
+    <rect x="79" y="96" width="8" height="101" rx="4"/>
+    <rect x="203" y="125" width="8" height="45" rx="4"/>
+    <rect x="186" y="110" width="8" height="74" rx="4"/>
+    <rect x="169" y="96" width="8" height="101" rx="4"/>
+    <path d="M94 89c0-9 8-15 16-11l12 8c8 5 16 7 25 7h5c7 0 13 6 13 13v91H94V89Z"/>
+  </g>
+  <g fill="url(#plum)">
+    <rect x="108" y="119" width="43" height="8" rx="4"/>
+    <rect x="108" y="143" width="43" height="8" rx="4"/>
+    <rect x="108" y="167" width="43" height="8" rx="4"/>
+  </g>
+</svg>

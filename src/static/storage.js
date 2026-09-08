@@ -2,13 +2,19 @@ let dbPromise;
 export function database() {
   if (!dbPromise)
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open("nine-gyo-phi-library", 2);
+      const request = indexedDB.open("nine-gyo-phi-library", 3);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains("documents"))
           db.createObjectStore("documents", { keyPath: "id" });
         if (!db.objectStoreNames.contains("settings"))
           db.createObjectStore("settings");
+        if (!db.objectStoreNames.contains("audiobooks")) {
+          const audiobooks = db.createObjectStore("audiobooks", {
+            keyPath: "id",
+          });
+          audiobooks.createIndex("docId", "docId", { unique: true });
+        }
         if (!db.objectStoreNames.contains("contents")) {
           const contents = db.createObjectStore("contents");
           const cursor = request.transaction
@@ -76,6 +82,18 @@ export const getSetting = (key) =>
   transaction("settings", "readonly", (s) => s.get(key));
 export const saveSetting = (key, value) =>
   transaction("settings", "readwrite", (s) => s.put(value, key));
+export const getAudiobookForDocument = async (docId) => {
+  const db = await database();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("audiobooks", "readonly");
+    const request = tx.objectStore("audiobooks").index("docId").get(docId);
+    tx.oncomplete = () => resolve(request.result);
+    tx.onerror = tx.onabort = () =>
+      reject(new Error("The local audiobook library could not be read."));
+  });
+};
+export const saveAudiobook = (audiobook) =>
+  transaction("audiobooks", "readwrite", (s) => s.put(audiobook));
 export async function importDocuments(docs) {
   const db = await database();
   return new Promise((resolve, reject) => {

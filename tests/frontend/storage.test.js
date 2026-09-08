@@ -9,6 +9,8 @@ import {
   saveSetting,
   getSetting,
   importDocuments,
+  getAudiobookForDocument,
+  saveAudiobook,
 } from "../../src/static/storage.js";
 test("document data, binary PDF, bookmarks and position survive storage roundtrip", async () => {
   const doc = {
@@ -69,6 +71,21 @@ test("draft and preferences are independently persisted", async () => {
   await saveSetting("preferences", { speed: 1.5 });
   assert.equal((await getSetting("draft")).text, "An unfinished idea");
   assert.equal((await getSetting("preferences")).speed, 1.5);
+});
+
+test("audiobook metadata and playback position stay in local storage", async () => {
+  const audiobook = {
+    id: "audio-local-1234",
+    docId: "document-for-audio",
+    title: "A local audiobook",
+    duration: 120,
+    size: 4096,
+    position: 32.5,
+  };
+  await saveAudiobook(audiobook);
+  assert.deepEqual(await getAudiobookForDocument(audiobook.docId), audiobook);
+  await saveAudiobook({ ...audiobook, position: 64 });
+  assert.equal((await getAudiobookForDocument(audiobook.docId)).position, 64);
 });
 test("multi-document import commits all documents together", async () => {
   await importDocuments([

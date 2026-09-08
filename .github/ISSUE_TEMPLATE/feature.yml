@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an improvement that fits the local-first listening-room mission.
+title: "[Feature]: "
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What listening or reading problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed experience
+      description: Describe the behavior from a user's perspective.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Privacy and offline considerations
+      description: Explain any network, model, storage, or document-data implications.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives
+      description: What workarounds or related tools have you considered?

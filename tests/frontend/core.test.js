@@ -6,6 +6,7 @@ import {
   textSegments,
   validateDocument,
   normalizeListeningUrl,
+  normalizePdfLinkUrl,
   decodeUrlSourceEnvelope,
   inferUrlSourceFormat,
   History,
@@ -31,6 +32,19 @@ test("listening URLs accept public web and local file sources", () => {
   assert.throws(() =>
     normalizeListeningUrl("file://another-computer/article.html"),
   );
+});
+
+test("PDF navigation links preserve destinations and reject unsafe schemes", () => {
+  assert.equal(
+    normalizePdfLinkUrl("https://example.com/chapter#section"),
+    "https://example.com/chapter#section",
+  );
+  assert.equal(
+    normalizePdfLinkUrl("mailto:reader@example.com"),
+    "mailto:reader@example.com",
+  );
+  assert.throws(() => normalizePdfLinkUrl("javascript:alert(1)"));
+  assert.throws(() => normalizePdfLinkUrl("https://name:secret@example.com"));
 });
 
 test("native URL envelopes preserve metadata and raw document bytes", () => {

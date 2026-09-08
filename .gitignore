@@ -3,6 +3,13 @@ node_modules/
 src-tauri/target/
 src-tauri/binaries/
 work/
+.env
+.env.*
+!.env.example
+*.gguf
+*.onnx
+*.part
+*.dmg
 .coverage
 .pytest_cache/
 __pycache__/

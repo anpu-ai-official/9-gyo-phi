@@ -1,4 +1,3 @@
-import { engineRequest, readEvents } from "./engine.js";
 import { wavBytes } from "./core.js";
 export class Player {
   constructor(onChange) {
@@ -133,53 +132,42 @@ export class Player {
     return { text, buffer };
   }
   async synthesize(text, options, generation) {
-    if (options.engine === "mlx") {
-      const context = await this.context();
-      if (generation !== this.generation) return null;
-      const response = await engineRequest("/api/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          voice: options.voice || "af_heart",
-          speed: options.speed,
-          use_llm: false,
-        }),
-        signal: AbortSignal.any([
-          this.controller.signal,
-          AbortSignal.timeout(120000),
-        ]),
-      });
-      const buffers = [];
-      await readEvents(response, async (event) => {
-        if (event.error) throw new Error(event.error);
-        if (event.audio_b64 && generation === this.generation)
-          buffers.push(
-            await context.decodeAudioData(
-              Uint8Array.from(atob(event.audio_b64), (c) => c.charCodeAt(0))
-                .buffer,
-            ),
-          );
-      });
-      if (generation !== this.generation) return null;
-      if (!buffers.length)
-        throw new Error(
-          "The engine returned no audio. Check its model installation and retry.",
-        );
-      const merged = context.createBuffer(
-        1,
-        buffers.reduce((sum, b) => sum + b.length, 0),
-        context.sampleRate,
-      );
-      let offset = 0;
-      for (const buffer of buffers) {
-        merged.copyToChannel(buffer.getChannelData(0), 0, offset);
-        offset += buffer.length;
-      }
-      return merged;
-    }
     if (options.engine === "neural") {
-      const ctx = await this.context();
+      if (window.__TAURI__?.core) {
+        this.update("loading", "Loading native Kokoro…");
+        const result = await window.__TAURI__.core.invoke(
+          "synthesize_kokoro_speech",
+          {
+            text,
+            voice: options.voice || "af_heart",
+            speed: options.speed,
+          },
+        );
+        if (generation !== this.generation) return null;
+        const bytes = Uint8Array.from(atob(result.pcm_b64), (character) =>
+          character.charCodeAt(0),
+        );
+        const pcm = new Int16Array(bytes.buffer);
+        const audio = new Float32Array(pcm.length);
+        for (let index = 0; index < pcm.length; index++)
+          audio[index] = pcm[index] / 32_767;
+        const rate = result.sample_rate || 24000;
+        if (options.offline)
+          return {
+            duration: audio.length / rate,
+            sampleRate: rate,
+            getChannelData: () => audio,
+          };
+        const ctx = await this.context();
+        const buffer = ctx.createBuffer(1, audio.length, rate);
+        buffer.copyToChannel(audio, 0);
+        return buffer;
+      }
+      // Audiobook export only needs PCM samples. Avoid resuming a live
+      // AudioContext after asynchronous LLM preparation, because WebKit may
+      // wait forever for another user gesture even though no playback is
+      // requested.
+      const ctx = options.offline ? null : await this.context();
       if (generation !== this.generation) return null;
       if (!this.worker)
         this.worker = new Worker(
@@ -215,14 +203,22 @@ export class Player {
               ),
             );
           else if (data.audio) {
-            const buffer = ctx.createBuffer(
-              1,
-              data.audio.length,
-              data.rate || 24000,
-            );
-            buffer.copyToChannel(data.audio, 0);
-            finish(null, buffer);
-          } else if (!options.prefetch)
+            const rate = data.rate || 24000;
+            if (options.offline) {
+              const audio = data.audio;
+              finish(null, {
+                duration: audio.length / rate,
+                sampleRate: rate,
+                getChannelData: () => audio,
+              });
+            } else {
+              const buffer = ctx.createBuffer(1, data.audio.length, rate);
+              buffer.copyToChannel(data.audio, 0);
+              finish(null, buffer);
+            }
+          } else if (data.stage && !options.prefetch)
+            this.update("loading", data.stage);
+          else if (!options.prefetch)
             this.update(
               "loading",
               data.progress

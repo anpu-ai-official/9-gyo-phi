@@ -20,7 +20,9 @@ test("web server serves app, correct module MIME, HEAD, and refuses traversal", 
     const js = await fetch(`${url}/static/app.js`);
     assert.equal(js.status, 200);
     assert.match(js.headers.get("content-type"), /javascript/);
-    const head = await fetch(`${url}/static/brand.svg`, { method: "HEAD" });
+    const head = await fetch(`${url}/static/brand-symbol.svg`, {
+      method: "HEAD",
+    });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");
     assert.equal((await fetch(`${url}/%2e%2e%2fpackage.json`)).status, 403);

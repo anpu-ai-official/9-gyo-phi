@@ -1,10 +1,10 @@
-import { engineRequest, readEvents } from "./engine.js";
 import {
   MAX_TEXT,
   MAX_PDF,
   MAX_DOCUMENT,
   STRUCTURED_FORMATS,
   normalizeListeningUrl,
+  normalizePdfLinkUrl,
   decodeUrlSourceEnvelope,
   inferUrlSourceFormat,
   words,
@@ -20,12 +20,15 @@ import {
   getSetting,
   saveSetting,
   importDocuments,
+  getAudiobookForDocument,
+  saveAudiobook,
 } from "./storage.js";
 import { parsePdfInBrowser, verbalizeRuleBasedNative } from "./parser.js";
 import { Player } from "./audio.js";
+import { prepareSpeechText } from "./speech.js";
 
 const $ = (id) => document.getElementById(id);
-const PDF_PARSER_VERSION = 3;
+const PDF_PARSER_VERSION = 2;
 const paths = {
   plus: "M12 5v14M5 12h14",
   library: "M4 4v16h4V4ZM12 4v16M16 4l4 15",
@@ -132,17 +135,25 @@ let docs = [],
   pdfRenderTasks = new Map(),
   renderedPdfPages = new Set(),
   pdfSegmentsByPage = new Map(),
+  pdfPageLabels = [],
   pdfScrollFrame = 0,
   openGeneration = 0,
-  pageGeneration = 0,
-  layoutController = null;
+  pageGeneration = 0;
 let draft = { title: "", text: "", id: null },
   draftTimer,
   draftRevision = 0,
   draftSavedRevision = 0,
   notesTimer;
+let audiobookController = null,
+  audiobookPositionTimer;
 const history = new History();
-let settings = { engine: "system", voice: "", speed: 1, smart: true };
+let settings = {
+  engine: "neural",
+  voice: "af_heart",
+  speed: 1,
+  smart: true,
+  llm: true,
+};
 let systemVoices = [],
   busyImport = false,
   currentIsDraft = false;
@@ -154,7 +165,7 @@ const TEMPLATES = {
   },
   code: {
     title: "Code, spoken clearly",
-    text: 'Code, spoken clearly\n\nSome ideas become easier to understand when you hear them. This short example walks through a small C program. Turn on “Speak code naturally” in the listening companion to hear punctuation and common syntax expressed as words.\n\n#include <stdio.h>\nmain()\n{\nprintf("Hello, world!");\nreturn 0;\n}\n\nA header makes standard input and output functions available. The main function is the starting point. The print statement writes a greeting, and returning zero signals a successful exit.\n\nThis app uses local rules for familiar syntax. It does not infer what arbitrary code does. Keep the original source beside the spoken version, and use your notes to record the important ideas.',
+    text: 'Code, spoken clearly\n\nSome ideas become easier to understand when you hear them. This short example walks through a small C program. Keep “Prepare text for natural speech” enabled in the listening companion to hear punctuation and common syntax expressed as words.\n\n#include <stdio.h>\nmain()\n{\nprintf("Hello, world!");\nreturn 0;\n}\n\nA header makes standard input and output functions available. The main function is the starting point. The print statement writes a greeting, and returning zero signals a successful exit.\n\nThis app uses a local language model to prepare all content for speech, with faithful rules as a fallback. Keep the original source beside the spoken version, and use your notes to record the important ideas.',
   },
   ideas: {
     title: "Make space for ideas",
@@ -163,6 +174,10 @@ const TEMPLATES = {
 };
 
 function closeDialog() {
+  if (audiobookController) {
+    audiobookController.abort();
+    audiobookController = null;
+  }
   $("appDialog").close();
 }
 function dialog(title, body, eyebrow = "YOUR LISTENING ROOM") {
@@ -350,7 +365,7 @@ async function addTemplate(key) {
 function showImport() {
   dialog(
     "What would you like to read?",
-    `<p class="dialog-copy">Bring a book, article, PDF, or fresh thought. Everything is saved privately on this device.</p><button class="dialog-option" id="chooseFiles">${icon("file")}<span><strong>Import from your device</strong><small>PDF, EPUB, HTML, Markdown, or TXT</small></span>${icon("arrow")}</button><button class="dialog-option" id="chooseUrl">${icon("link")}<span><strong>Listen from a URL</strong><small>Web articles or local file:/// links</small></span>${icon("arrow")}</button><button class="dialog-option" id="writeInstead">${icon("edit")}<span><strong>Write or paste text</strong><small>A clean page for your next idea</small></span>${icon("arrow")}</button><p class="hint">Advanced local layout analysis preserves headings, lists, columns, tables, and code while removing page furniture.</p>`,
+    `<p class="dialog-copy">Bring a book, article, PDF, or fresh thought. Everything is saved privately on this device.</p><button class="dialog-option" id="chooseFiles">${icon("file")}<span><strong>Import from your device</strong><small>PDF, EPUB, HTML, Markdown, or TXT</small></span>${icon("arrow")}</button><button class="dialog-option" id="chooseUrl">${icon("link")}<span><strong>Listen from a URL</strong><small>Web articles or local file:/// links</small></span>${icon("arrow")}</button><button class="dialog-option" id="writeInstead">${icon("edit")}<span><strong>Write or paste text</strong><small>A clean page for your next idea</small></span>${icon("arrow")}</button><p class="hint">Format-aware local parsing preserves useful reading order and structure without uploading your book.</p>`,
   );
   $("chooseFiles").onclick = () => {
     closeDialog();
@@ -535,8 +550,7 @@ async function importFiles(files, options = {}) {
           doc.segments = data.segments;
           doc.pageCount = data.num_pages;
           doc.pdfPages = data.pages;
-          doc.pdfParserVersion =
-            data.parser === "docling" ? PDF_PARSER_VERSION : 2;
+          doc.pdfParserVersion = PDF_PARSER_VERSION;
           doc.minutes = minutes(
             data.segments.map((s) => s.original_text).join(" "),
           );
@@ -557,7 +571,7 @@ async function importFiles(files, options = {}) {
         doc.minutes = minutes(text);
       } else {
         const bytes = await file.arrayBuffer();
-        const data = await parseDocumentWithEngine(file.name, bytes);
+        const data = parseStructuredDocument(file.name, bytes);
         const text = data.segments
           .map((segment) => segment.original_text)
           .join("\n\n")
@@ -631,166 +645,87 @@ async function loadPdf(bytes) {
   }).promise;
 }
 
-async function parseDocumentWithEngine(
-  filename,
-  bytes,
-  { pageStart, pageEnd, signal } = {},
-) {
-  const headers = {
-    "Content-Type": "application/octet-stream",
-    "X-Document-Name": encodeURIComponent(filename),
-  };
-  if (pageStart) headers["X-Page-Start"] = String(pageStart);
-  if (pageEnd) headers["X-Page-End"] = String(pageEnd);
-  const response = await engineRequest("/api/documents/parse", {
-    method: "POST",
-    headers,
-    body: bytes,
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(15 * 60 * 1000)])
-      : AbortSignal.timeout(15 * 60 * 1000),
-  });
-  const data = await response.json();
-  if (!Array.isArray(data.segments) || !data.segments.length)
-    throw new Error("The layout engine found no readable content.");
-  return data;
+function cleanHtmlDocument(source) {
+  const document = new DOMParser().parseFromString(source, "text/html");
+  document
+    .querySelectorAll(
+      "script,style,noscript,template,svg,canvas,form,button,nav,footer,aside",
+    )
+    .forEach((element) => element.remove());
+  const root = document.querySelector("article,main") || document.body;
+  const blocks = [...root.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li,pre")]
+    .filter((element) => !element.closest("pre") || element.matches("pre"))
+    .map((element) => element.textContent.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  return blocks.length
+    ? blocks.join("\n\n")
+    : root.textContent.replace(/\s+/g, " ").trim();
 }
 
-function equivalentPosition(previousSegments, nextSegments, position) {
-  const previous = previousSegments[position];
-  if (previous) {
-    const exact = nextSegments.findIndex(
-      (segment) =>
-        segment.page === previous.page &&
-        segment.original_text === previous.original_text,
-    );
-    if (exact >= 0) return exact;
-    const samePage = nextSegments.findIndex(
-      (segment) => segment.page === previous.page,
-    );
-    if (samePage >= 0) return samePage;
+function resolveArchivePath(base, relative) {
+  const parts = base.split("/");
+  parts.pop();
+  for (const part of relative.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
   }
-  return Math.min(
-    Math.max(0, nextSegments.length - 1),
-    Math.max(
-      0,
-      Math.round(
-        (position / Math.max(1, previousSegments.length - 1)) *
-          Math.max(0, nextSegments.length - 1),
-      ),
-    ),
-  );
+  return parts.join("/");
 }
 
-function attachPdfWordBoxes(advancedSegments, fastSegments) {
-  const wordsByPage = new Map();
-  for (const segment of fastSegments) {
-    if (!Array.isArray(segment.word_boxes)) continue;
-    if (!wordsByPage.has(segment.page)) wordsByPage.set(segment.page, []);
-    wordsByPage.get(segment.page).push(...segment.word_boxes);
-  }
-  const normalized = (value) =>
-    value.toLocaleLowerCase().replace(/^\W+|\W+$/g, "");
-  for (const segment of advancedSegments) {
-    const wanted = new Set(
-      segment.original_text.split(/\s+/).map(normalized).filter(Boolean),
-    );
-    const words = (wordsByPage.get(segment.page) || [])
-      .filter((word) => {
-        const centerX = word.x + word.w / 2;
-        const centerY = word.y + word.h / 2;
-        const inside = (segment.boxes || []).some(
-          (box) =>
-            centerX >= box.x - 0.5 &&
-            centerX <= box.x + box.w + 0.5 &&
-            centerY >= box.y - 0.5 &&
-            centerY <= box.y + box.h + 0.5,
-        );
-        return (
-          inside &&
-          (segment.is_code ||
-            !normalized(word.text) ||
-            wanted.has(normalized(word.text)))
-        );
-      })
-      .sort((a, b) => a.y - b.y || a.x - b.x);
-    if (words.length) segment.word_boxes = words;
-  }
-}
-
-async function improvePdfLayout(doc, bytes, totalPages, generation) {
-  const controller = new AbortController();
-  layoutController = controller;
-  let enhanced = Array.isArray(doc.layoutSegments) ? doc.layoutSegments : [];
-  let startPage = Math.max(1, (doc.layoutPagesDone || 0) + 1);
+function parseEpub(bytes) {
+  if (!window.fflate)
+    throw new Error("The EPUB reader did not load. Reload the app and retry.");
+  let files;
   try {
-    for (; startPage <= totalPages; startPage += 12) {
-      const endPage = Math.min(totalPages, startPage + 11);
-      if (controller.signal.aborted || generation !== openGeneration) return;
-      if (current?.id === doc.id && player.state === "idle")
-        $("playerDetail").textContent =
-          `Improving layout in background · ${startPage - 1} / ${totalPages} pages`;
-      const batch = await parseDocumentWithEngine(
-        `${doc.title || "document"}.pdf`,
-        bytes,
-        {
-          pageStart: startPage,
-          pageEnd: endPage,
-          signal: controller.signal,
-        },
-      );
-      attachPdfWordBoxes(batch.segments, doc.segments || []);
-      enhanced = enhanced
-        .filter(
-          (segment) =>
-            segment.page < startPage - 1 || segment.page > endPage - 1,
-        )
-        .concat(batch.segments)
-        .sort((a, b) => a.page - b.page || a.id - b.id)
-        .map((segment, id) => ({ ...segment, id }));
-      doc.layoutSegments = enhanced;
-      doc.layoutPagesDone = endPage;
-      doc.layoutParser = "docling-progress";
-      await persist(doc);
-    }
-
-    const previousSegments = doc.segments || [];
-    const nextPosition = equivalentPosition(
-      previousSegments,
-      enhanced,
-      doc.position || 0,
-    );
-    doc.pdfParserVersion = PDF_PARSER_VERSION;
-    doc.layoutParser = "docling";
-    doc.minutes = minutes(
-      enhanced.map((segment) => segment.original_text).join(" "),
-    );
-    delete doc.layoutSegments;
-    delete doc.layoutPagesDone;
-
-    if (
-      current?.id === doc.id &&
-      generation === openGeneration &&
-      ["idle", "finished", "error"].includes(player.state)
-    ) {
-      doc.segments = enhanced;
-      doc.position = nextPosition;
-      activeSegments = enhanced;
-      player.index = nextPosition;
-      pdfPage = activeSegments[nextPosition]?.page || pdfPage;
-      $("positionRange").max = Math.max(0, enhanced.length - 1);
-      renderPassages();
-      await renderPdfDocument({ keepPage: pdfPage });
-      updatePlayer({ state: "idle", index: nextPosition });
-      toast("Advanced reading order is ready.");
-    } else {
-      doc.pendingLayoutSegments = enhanced;
-      doc.pendingLayoutPosition = nextPosition;
-    }
-    await persist(doc);
-  } finally {
-    if (layoutController === controller) layoutController = null;
+    files = window.fflate.unzipSync(new Uint8Array(bytes));
+  } catch {
+    throw new Error("This EPUB archive is damaged or unsupported.");
   }
+  const decode = (path) => {
+    const data = files[path];
+    if (!data) throw new Error(`The EPUB is missing ${path}.`);
+    return new TextDecoder().decode(data);
+  };
+  const container = new DOMParser().parseFromString(
+    decode("META-INF/container.xml"),
+    "application/xml",
+  );
+  const packagePath = container
+    .getElementsByTagNameNS("*", "rootfile")[0]
+    ?.getAttribute("full-path");
+  if (!packagePath) throw new Error("The EPUB has no package document.");
+  const packageDocument = new DOMParser().parseFromString(
+    decode(packagePath),
+    "application/xml",
+  );
+  const manifest = new Map(
+    [...packageDocument.getElementsByTagNameNS("*", "item")].map((item) => [
+      item.getAttribute("id"),
+      item.getAttribute("href"),
+    ]),
+  );
+  const chapters = [...packageDocument.getElementsByTagNameNS("*", "itemref")]
+    .map((item) => manifest.get(item.getAttribute("idref")))
+    .filter(Boolean)
+    .map((href) => decode(resolveArchivePath(packagePath, href.split("#")[0])))
+    .map(cleanHtmlDocument)
+    .filter(Boolean);
+  if (!chapters.length)
+    throw new Error("The EPUB has no readable spine content.");
+  return chapters.join("\n\n");
+}
+
+function parseStructuredDocument(filename, bytes) {
+  const extension = filename.split(".").pop().toLowerCase();
+  const decoded =
+    extension === "epub" ? parseEpub(bytes) : new TextDecoder().decode(bytes);
+  const text = ["html", "htm", "xhtml"].includes(extension)
+    ? cleanHtmlDocument(decoded)
+    : decoded.trim();
+  const segments = textSegments(text);
+  if (!segments.length) throw new Error("No readable content was found.");
+  return { segments, parser: "native-web", num_pages: 0 };
 }
 async function openDocument(id) {
   const doc = docs.find((d) => d.id === id);
@@ -801,13 +736,12 @@ async function openDocument(id) {
   }
   if (view === "reader") await persistNotes();
   player.stop();
-  layoutController?.abort();
-  layoutController = null;
   const generation = ++openGeneration;
   ++pageGeneration;
   for (const task of pdfRenderTasks.values()) task.cancel();
   pdfRenderTasks.clear();
   renderedPdfPages.clear();
+  pdfPageLabels = [];
   cancelAnimationFrame(pdfScrollFrame);
   $("pdfPages").replaceChildren();
   if (pdf) {
@@ -816,13 +750,6 @@ async function openDocument(id) {
   }
   player.buffers = [];
   player.recordedSeconds = 0;
-  if (Array.isArray(doc.pendingLayoutSegments)) {
-    doc.segments = doc.pendingLayoutSegments;
-    doc.position = doc.pendingLayoutPosition || 0;
-    delete doc.pendingLayoutSegments;
-    delete doc.pendingLayoutPosition;
-    await persist(doc);
-  }
   current = doc;
   currentIsDraft = false;
   activeSegments = doc.segments || textSegments(doc.text);
@@ -869,18 +796,6 @@ async function openDocument(id) {
       pdf = loaded;
       await renderPdfDocument();
       updatePlayer({ state: "idle", index: doc.position });
-      if ((doc.pdfParserVersion || 0) < PDF_PARSER_VERSION)
-        improvePdfLayout(doc, activePdfBytes, pdf.numPages, generation).catch(
-          () => {
-            if (
-              current?.id === doc.id &&
-              generation === openGeneration &&
-              player.state === "idle"
-            )
-              $("playerDetail").textContent =
-                "Ready · fast reading order active";
-          },
-        );
     } catch (error) {
       report(error);
       $("playerDetail").textContent =
@@ -915,6 +830,162 @@ function pdfSegmentLabel(segment) {
   return `Read from here: ${text.slice(0, 120)}`;
 }
 
+function pdfLinkSpeechStart(pageIndex, rect) {
+  const centerX = rect.x + rect.w / 2;
+  const centerY = rect.y + rect.h / 2;
+  let segmentMatch = null;
+  for (const { segment, index } of pdfSegmentsByPage.get(pageIndex) || []) {
+    for (const [wordIndex, box] of (segment.word_boxes || []).entries()) {
+      if (
+        centerX >= box.x &&
+        centerX <= box.x + box.w &&
+        centerY >= box.y &&
+        centerY <= box.y + box.h
+      )
+        return { segmentIndex: index, wordIndex };
+    }
+    if (
+      !segmentMatch &&
+      (segment.boxes || []).some(
+        (box) =>
+          centerX >= box.x &&
+          centerX <= box.x + box.w &&
+          centerY >= box.y &&
+          centerY <= box.y + box.h,
+      )
+    )
+      segmentMatch = { segmentIndex: index };
+  }
+  return segmentMatch;
+}
+
+function pdfAnnotationRect(annotation, viewport) {
+  if (!Array.isArray(annotation.rect) || annotation.rect.length !== 4)
+    return null;
+  const converted = viewport.convertToViewportRectangle(annotation.rect);
+  const left = Math.max(0, Math.min(converted[0], converted[2]));
+  const top = Math.max(0, Math.min(converted[1], converted[3]));
+  const right = Math.min(viewport.width, Math.max(converted[0], converted[2]));
+  const bottom = Math.min(
+    viewport.height,
+    Math.max(converted[1], converted[3]),
+  );
+  if (right <= left || bottom <= top) return null;
+  return {
+    x: (left / viewport.width) * 100,
+    y: (top / viewport.height) * 100,
+    w: ((right - left) / viewport.width) * 100,
+    h: ((bottom - top) / viewport.height) * 100,
+  };
+}
+
+function pdfLinkLabel(annotation) {
+  if (annotation.url) {
+    try {
+      return `Open link to ${new URL(annotation.url).hostname || annotation.url}`;
+    } catch {
+      return "Open PDF link";
+    }
+  }
+  return "Go to linked page";
+}
+
+async function populatePdfLinks(page, pageIndex, viewport, layer) {
+  const annotations = await page.getAnnotations({ intent: "display" });
+  if (layer.dataset.linksPopulated === "true") return;
+  for (const annotation of annotations) {
+    if (!annotation.url && !annotation.dest && !annotation.action) continue;
+    const rect = pdfAnnotationRect(annotation, viewport);
+    if (!rect) continue;
+    let url = "";
+    if (annotation.url) {
+      try {
+        url = normalizePdfLinkUrl(annotation.url);
+      } catch {
+        continue;
+      }
+    }
+
+    const region = document.createElement("span");
+    region.className = "pdf-link-region";
+    region.style.left = `${rect.x}%`;
+    region.style.top = `${rect.y}%`;
+    region.style.width = `${rect.w}%`;
+    region.style.height = `${rect.h}%`;
+
+    const link = document.createElement("a");
+    link.className = "pdf-link-target";
+    link.href = url || `#pdf-page-${pageIndex + 1}`;
+    link.setAttribute("aria-label", pdfLinkLabel(annotation));
+    link.title = pdfLinkLabel(annotation);
+    if (url) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.dataset.pdfUrl = url;
+    } else {
+      link._pdfDestination = annotation.dest;
+      link.dataset.pdfAction = annotation.action || "";
+    }
+    region.append(link);
+
+    const start = pdfLinkSpeechStart(pageIndex, rect);
+    if (start) {
+      const play = document.createElement("button");
+      play.type = "button";
+      play.className = "pdf-link-play";
+      play.dataset.segment = start.segmentIndex;
+      if (Number.isInteger(start.wordIndex))
+        play.dataset.word = start.wordIndex;
+      play.setAttribute("aria-label", "Listen from this link");
+      play.title = "Listen from this link";
+      play.innerHTML = icon("play");
+      region.append(play);
+    }
+    layer.append(region);
+  }
+  layer.dataset.linksPopulated = "true";
+}
+
+async function goToPdfDestination(destination, action = "") {
+  let pageIndex;
+  if (destination) {
+    const resolved =
+      typeof destination === "string"
+        ? await pdf.getDestination(destination)
+        : destination;
+    const reference = resolved?.[0];
+    pageIndex = Number.isInteger(reference)
+      ? reference
+      : reference
+        ? await pdf.getPageIndex(reference)
+        : undefined;
+  } else {
+    pageIndex = {
+      FirstPage: 0,
+      LastPage: pdf.numPages - 1,
+      NextPage: pdfPage + 1,
+      PrevPage: pdfPage - 1,
+    }[action];
+  }
+  if (!Number.isInteger(pageIndex)) return;
+  pdfPage = Math.max(0, Math.min(pdf.numPages - 1, pageIndex));
+  updatePdfToolbar();
+  scrollToPdfPage(pdfPage);
+}
+
+function goToPdfPage(pageIndex) {
+  if (!Number.isInteger(pageIndex)) return;
+  pdfPage = Math.max(0, Math.min(pdf.numPages - 1, pageIndex));
+  updatePdfToolbar();
+  scrollToPdfPage(pdfPage);
+}
+
+async function openPdfUrl(url) {
+  if (window.__TAURI__?.core)
+    return window.__TAURI__.core.invoke("open_external_url", { rawUrl: url });
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 async function renderPdfDocument({ keepPage = pdfPage } = {}) {
   if (!pdf) return;
   const generation = ++pageGeneration;
@@ -922,6 +993,13 @@ async function renderPdfDocument({ keepPage = pdfPage } = {}) {
   pdfRenderTasks.clear();
   renderedPdfPages.clear();
   const pages = await getPdfPageMetadata();
+  if (!pdfPageLabels.length) {
+    const labels = await pdf.getPageLabels();
+    pdfPageLabels =
+      labels?.length === pdf.numPages
+        ? labels
+        : pages.map((_, index) => String(index + 1));
+  }
   if (generation !== pageGeneration) return;
 
   pdfSegmentsByPage = new Map();
@@ -1010,6 +1088,120 @@ function populatePdfTextTargets(index) {
   layer.dataset.populated = "true";
 }
 
+function pdfTextItemRect(item, viewport) {
+  const transformed = window.pdfjsLib.Util.transform(
+    viewport.transform,
+    item.transform,
+  );
+  const height = Math.max(4, Math.hypot(transformed[2], transformed[3]));
+  return {
+    text: item.str.trim(),
+    x: (transformed[4] / viewport.width) * 100,
+    y: ((transformed[5] - height) / viewport.height) * 100,
+    w: ((item.width * viewport.scale) / viewport.width) * 100,
+    h: (height / viewport.height) * 100,
+  };
+}
+
+function pdfTextLines(items, viewport) {
+  const words = items
+    .filter((item) => item.str?.trim())
+    .map((item) => pdfTextItemRect(item, viewport))
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const word of words) {
+    let line = lines.find(
+      (candidate) =>
+        Math.abs(candidate.y - word.y) <=
+        Math.max(0.35, Math.min(candidate.h, word.h) * 0.5),
+    );
+    if (!line) {
+      line = { y: word.y, h: word.h, words: [] };
+      lines.push(line);
+    }
+    line.words.push(word);
+    line.h = Math.max(line.h, word.h);
+  }
+  for (const line of lines) line.words.sort((a, b) => a.x - b.x);
+  return lines;
+}
+
+async function populateInferredPdfLinks(page, pageIndex, viewport, layer) {
+  if (
+    layer.dataset.inferredLinksPopulated === "true" ||
+    layer.querySelector(".pdf-link-target:not([data-pdf-url])")
+  )
+    return;
+  const { items = [] } = await page.getTextContent({
+    normalizeWhitespace: false,
+  });
+  const lines = pdfTextLines(items, viewport);
+  if (
+    !lines.some((line) =>
+      /\bcontents\b/i.test(line.words.map((word) => word.text).join(" ")),
+    )
+  ) {
+    layer.dataset.inferredLinksPopulated = "true";
+    return;
+  }
+  const fallbackSegment = (pdfSegmentsByPage.get(pageIndex) || [])[0];
+  if (!fallbackSegment) return;
+
+  for (const line of lines) {
+    const lineText = line.words
+      .map((word) => word.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const match = lineText.match(
+      /^(.*?[a-z][^\n]*?)\s+(\d{1,4}|[ivxlcdm]+)\s*$/i,
+    );
+    if (!match) continue;
+    const printedPage = match[2];
+    const destinationPage = pdfPageLabels.indexOf(printedPage);
+    if (destinationPage < 0) continue;
+    const label = match[1].replace(/\s*\.{2,}\s*/g, " ").trim();
+
+    const left = Math.min(...line.words.map((word) => word.x));
+    const top = Math.min(...line.words.map((word) => word.y));
+    const right = Math.max(...line.words.map((word) => word.x + word.w));
+    const bottom = Math.max(...line.words.map((word) => word.y + word.h));
+    const region = document.createElement("span");
+    region.className = "pdf-link-region";
+    region.style.left = `${left}%`;
+    region.style.top = `${top}%`;
+    region.style.width = `${right - left}%`;
+    region.style.height = `${bottom - top}%`;
+
+    const link = document.createElement("a");
+    link.className = "pdf-link-target";
+    link.href = `#pdf-page-${destinationPage + 1}`;
+    link.dataset.pdfPage = destinationPage;
+    link.setAttribute("aria-label", `Open ${label}, page ${printedPage}`);
+    link.title = `Go to page ${printedPage}`;
+    region.append(link);
+
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "pdf-link-play";
+    const start = pdfLinkSpeechStart(pageIndex, {
+      x: left,
+      y: top,
+      w: right - left,
+      h: bottom - top,
+    });
+    play.dataset.segment = start?.segmentIndex ?? fallbackSegment.index;
+    if (Number.isInteger(start?.wordIndex)) play.dataset.word = start.wordIndex;
+    else play.dataset.firstText = label;
+    play.setAttribute("aria-label", `Listen from ${label}`);
+    play.title = "Listen from this link";
+    play.innerHTML = icon("play");
+    region.append(play);
+    layer.append(region);
+  }
+  layer.dataset.inferredLinksPopulated = "true";
+}
+
 async function renderPdfPage(index, generation = pageGeneration) {
   if (
     !pdf ||
@@ -1020,22 +1212,45 @@ async function renderPdfPage(index, generation = pageGeneration) {
     return;
   const shell = $("pdfPages").querySelector(`[data-page="${index}"]`);
   if (!shell) return;
-  populatePdfTextTargets(index);
-  const page = await pdf.getPage(index + 1);
-  if (generation !== pageGeneration) return;
-  const base = page.getViewport({ scale: 1 });
-  const viewport = page.getViewport({ scale: shell.clientWidth / base.width });
-  const density = Math.min(window.devicePixelRatio || 1, 2);
-  const canvas = shell.querySelector("canvas");
-  canvas.width = Math.floor(viewport.width * density);
-  canvas.height = Math.floor(viewport.height * density);
-  const task = page.render({
-    canvasContext: canvas.getContext("2d"),
-    viewport,
-    transform: [density, 0, 0, density, 0, 0],
-  });
-  pdfRenderTasks.set(index, task);
+  const reservation = {
+    cancelled: false,
+    cancel() {
+      this.cancelled = true;
+    },
+  };
+  let task = reservation;
+  pdfRenderTasks.set(index, reservation);
   try {
+    populatePdfTextTargets(index);
+    const page = await pdf.getPage(index + 1);
+    if (generation !== pageGeneration || reservation.cancelled) return;
+    const base = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({
+      scale: shell.clientWidth / base.width,
+    });
+    await populatePdfLinks(
+      page,
+      index,
+      viewport,
+      shell.querySelector(".pdf-text-layer"),
+    );
+    await populateInferredPdfLinks(
+      page,
+      index,
+      viewport,
+      shell.querySelector(".pdf-text-layer"),
+    );
+    if (generation !== pageGeneration || reservation.cancelled) return;
+    const density = Math.min(window.devicePixelRatio || 1, 2);
+    const canvas = shell.querySelector("canvas");
+    canvas.width = Math.floor(viewport.width * density);
+    canvas.height = Math.floor(viewport.height * density);
+    task = page.render({
+      canvasContext: canvas.getContext("2d"),
+      viewport,
+      transform: [density, 0, 0, density, 0, 0],
+    });
+    pdfRenderTasks.set(index, task);
     await task.promise;
     if (generation === pageGeneration) {
       renderedPdfPages.add(index);
@@ -1075,6 +1290,8 @@ function renderVisiblePdfPages() {
         canvas.height = 1;
         layer.replaceChildren();
         delete layer.dataset.populated;
+        delete layer.dataset.linksPopulated;
+        delete layer.dataset.inferredLinksPopulated;
       }
     });
 }
@@ -1291,33 +1508,25 @@ function playbackOptions() {
     speed: settings.speed,
     transform: async (segment, { signal } = {}) => {
       if (!settings.smart) return segment.original_text;
-      let transformed = false;
       const local = segment.original_text
         .split("\n")
         .map((line) => {
           const result = verbalizeRuleBasedNative(line);
-          transformed ||= result.transformed;
           return result.text || line;
         })
         .join(" ");
-      if (!segment.is_code || transformed || settings.engine !== "mlx")
-        return local;
-      try {
-        const response = await engineRequest("/api/verbalize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: segment.original_text,
-            is_code: true,
-            use_llm: true,
-          }),
-          signal: AbortSignal.any([signal, AbortSignal.timeout(120000)]),
-        });
-        const result = await response.json();
-        return result.speech_text || local;
-      } catch {
-        return local;
-      }
+      return prepareSpeechText(segment, {
+        enabled: settings.llm,
+        fallback: local,
+        signal,
+        request: window.__TAURI__?.core
+          ? (payload) =>
+              window.__TAURI__.core.invoke("prepare_speech_native", {
+                text: payload.text,
+                isCode: payload.is_code,
+              })
+          : null,
+      });
     },
   };
 }
@@ -1577,12 +1786,20 @@ async function showSettings() {
   await loadVoices();
   dialog(
     "A voice that feels right.",
-    `<p class="dialog-copy">Choose your listening companion. System voices are ready without a model download.</p><label class="dialog-field">Speech engine<select id="engineSelect"><option value="system">System · built into your device</option><option value="neural">Kokoro · optional neural voice</option><option value="mlx">MLX · optional local Python engine</option></select></label><p class="hint" id="engineHint"></p><label class="dialog-field">Voice<select id="voiceSelect"></select></label><label class="dialog-field">Playback speed<select id="settingsSpeed">${[0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => `<option value="${speed}">${speed}×${speed === 1 ? " · natural pace" : ""}</option>`).join("")}</select></label><div class="label-row"><label for="settingsSmart">Speak code naturally</label><input id="settingsSmart" type="checkbox" class="switch"></div><p class="hint">Uses local syntax rules. Original documents are always preserved.</p><div class="dialog-actions"><button class="secondary" id="localModels">Local models</button><button class="secondary" id="showWelcomeAgain">Quick tour</button><button class="primary" id="applySettings">Save preferences</button></div>`,
+    `<p class="dialog-copy">Choose your listening companion. Everything runs locally without Python.</p><label class="dialog-field">Speech engine<select id="engineSelect"><option value="system">System · built into your device</option><option value="neural">Kokoro · local neural voice</option></select></label><p class="hint" id="engineHint"></p><label class="dialog-field">Voice<select id="voiceSelect"></select></label><label class="dialog-field">Playback speed<select id="settingsSpeed">${[0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => `<option value="${speed}">${speed}×${speed === 1 ? " · natural pace" : ""}</option>`).join("")}</select></label><div class="label-row"><label for="settingsSmart">Prepare text for natural speech</label><input id="settingsSmart" type="checkbox" class="switch"></div><p class="hint">Makes code, notation, abbreviations, measurements, links, and other written forms easier to hear. Original documents are always preserved.</p><div class="label-row"><label for="settingsLlm">Use native local LLM to prepare speech</label><input id="settingsLlm" type="checkbox" class="switch"></div><p class="hint">Enabled by default for every passage and every voice. A compact llama.cpp model runs with Metal and rules provide the fallback.</p><div class="dialog-actions"><button class="secondary" id="localModels">Local model</button><button class="secondary" id="showWelcomeAgain">Quick tour</button><button class="primary" id="applySettings">Save preferences</button></div>`,
     "MADE FOR YOUR EARS",
   );
+  document.querySelector('label[for="settingsLlm"]').textContent =
+    "Use native local LLM to prepare speech";
   $("engineSelect").value = settings.engine;
   $("settingsSpeed").value = settings.speed;
   $("settingsSmart").checked = settings.smart;
+  $("settingsLlm").checked = settings.llm;
+  const syncLlmSetting = () => {
+    $("settingsLlm").disabled = !$("settingsSmart").checked;
+  };
+  syncLlmSetting();
+  $("settingsSmart").onchange = syncLlmSetting;
   const populate = () => {
     const neural = $("engineSelect").value !== "system";
     $("voiceSelect").innerHTML = neural
@@ -1602,14 +1819,11 @@ async function showSettings() {
       )
     )
       $("voiceSelect").value = settings.voice;
-    $("engineHint").textContent =
-      $("engineSelect").value === "mlx"
-        ? "Connects only to your local engine. Start it using the README setup instructions, then manage optional models below."
-        : neural
-          ? "First play downloads a neural model (approximately 100 MB plus runtime files). Internet is required until those files are cached. Stop cancels preparation. Documents stay on your device."
-          : window.__TAURI__?.core
-            ? "Native macOS audio supports WAV export. No model download is needed."
-            : "Browser system speech is ready to use. WAV export is available with the desktop app or a neural voice. Offline availability depends on installed system voices.";
+    $("engineHint").textContent = neural
+      ? "First play downloads the quantized Kokoro model. Desktop inference then runs in native Rust without Python; browser preview uses a worker."
+      : window.__TAURI__?.core
+        ? "Native macOS audio supports WAV export. No model download is needed."
+        : "Browser system speech is ready to use. Offline availability depends on installed system voices.";
   };
   populate();
   $("engineSelect").onchange = populate;
@@ -1622,6 +1836,7 @@ async function showSettings() {
         voice: $("voiceSelect").value,
         speed: Number($("settingsSpeed").value),
         smart: $("settingsSmart").checked,
+        llm: $("settingsLlm").checked,
       };
       await saveSetting("preferences", next);
       player.stop();
@@ -1665,7 +1880,7 @@ function showShortcuts() {
 function showWelcome() {
   dialog(
     "A little more room to listen.",
-    `<img class="onboarding-mark" src="./static/brand.svg" width="70" height="70" alt="9-gyo-phi book and sound mark"><p class="dialog-copy">Welcome to your listening room. A quiet home for the words you want to spend more time with.</p><div class="welcome-lines"><div>${icon("file")}<span><strong>Bring your own words.</strong><br>Import a PDF, EPUB, HTML article, Markdown file, or start a note.</span></div><div>${icon("headphones")}<span><strong>Find your rhythm.</strong><br>Choose a voice. Set the pace. Pick up where you left off.</span></div><div>${icon("shield")}<span><strong>Keep it yours.</strong><br>No account. Local storage. Export a backup anytime.</span></div></div><div class="dialog-actions"><button class="secondary" id="skipWelcome">Explore my library</button><button class="primary" id="welcomeSample">Try a 2-minute read ${icon("arrow")}</button></div>`,
+    `<img class="onboarding-mark" src="./static/brand-symbol.svg" width="70" height="70" alt="9-gyo-phi document and sound mark"><p class="dialog-copy">Welcome to your listening room. A quiet home for the words you want to spend more time with.</p><div class="welcome-lines"><div>${icon("file")}<span><strong>Bring your own words.</strong><br>Import a PDF, EPUB, HTML article, Markdown file, or start a note.</span></div><div>${icon("headphones")}<span><strong>Find your rhythm.</strong><br>Choose a voice. Set the pace. Pick up where you left off.</span></div><div>${icon("shield")}<span><strong>Keep it yours.</strong><br>No account. Local storage. Export a backup anytime.</span></div></div><div class="dialog-actions"><button class="secondary" id="skipWelcome">Explore my library</button><button class="primary" id="welcomeSample">Try a 2-minute read ${icon("arrow")}</button></div>`,
     "WELCOME TO 9-GYO-PHI",
   );
   const finish = async (sample) => {
@@ -1676,15 +1891,158 @@ function showWelcome() {
   $("skipWelcome").onclick = () => finish(false).catch(report);
   $("welcomeSample").onclick = () => finish(true).catch(report);
 }
-function showExport() {
+function audiobookUrl(audiobook) {
+  if (audiobook.path && window.__TAURI__?.core?.convertFileSrc)
+    return window.__TAURI__.core.convertFileSrc(audiobook.path);
+  return audiobook.path || "";
+}
+
+async function createAudiobook(existing = null) {
+  if (!current || !window.__TAURI__?.core)
+    throw new Error("Complete M4B creation is available in the desktop app.");
+  const sourceDocument = current;
+  const audiobookId = existing?.id || crypto.randomUUID();
+  player.stop();
+  audiobookController?.abort();
+  audiobookController = new AbortController();
+  const signal = audiobookController.signal;
+  const studio = new Player(({ state, detail }) => {
+    const status = $("audiobookStatus");
+    if (status && state === "loading" && detail) status.textContent = detail;
+  });
+  signal.addEventListener("abort", () => studio.stop(), { once: true });
+  dialog(
+    "Creating your audiobook.",
+    `<p class="dialog-copy">Preparing every passage locally, then recording with Kokoro and packaging an M4B audiobook. Keep the app open until encoding finishes.</p><progress id="audiobookProgress" max="100" value="0"></progress><p class="dialog-status" id="audiobookStatus">Starting Kokoro…</p><div class="dialog-actions"><button class="secondary" id="cancelAudiobook">Cancel</button></div>`,
+    "LOCAL AUDIOBOOK STUDIO",
+  );
+  $("cancelAudiobook").onclick = closeDialog;
+  try {
+    await window.__TAURI__.core.invoke("start_audiobook", { id: audiobookId });
+    const options = playbackOptions();
+    const voice = /^.[fm]_/.test(settings.voice) ? settings.voice : "af_heart";
+    for (const [index, segment] of activeSegments.entries()) {
+      if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
+      const prepared = options.transform
+        ? await options.transform(segment, { signal })
+        : segment.original_text;
+      const buffer = await studio.synthesize(
+        prepared,
+        { engine: "neural", voice, speed: settings.speed, offline: true },
+        studio.generation,
+      );
+      if (!buffer || signal.aborted)
+        throw new DOMException("Cancelled", "AbortError");
+      const floats = buffer.getChannelData(0);
+      for (let offset = 0; offset < floats.length; offset += 32_768) {
+        const end = Math.min(floats.length, offset + 32_768);
+        const samples = new Int16Array(end - offset);
+        for (let sample = offset; sample < end; sample++)
+          samples[sample - offset] = Math.round(
+            Math.max(-1, Math.min(1, floats[sample])) * 32_767,
+          );
+        await window.__TAURI__.core.invoke("append_audiobook_pcm", {
+          id: audiobookId,
+          samples: Array.from(samples),
+        });
+      }
+      await window.__TAURI__.core.invoke("append_audiobook_pcm", {
+        id: audiobookId,
+        samples: Array(Math.round(24_000 * 0.22)).fill(0),
+      });
+      const percent = Math.round(((index + 1) / activeSegments.length) * 100);
+      $("audiobookProgress").value = percent;
+      $("audiobookStatus").textContent =
+        `Narrating passage ${(index + 1).toLocaleString()} of ${activeSegments.length.toLocaleString()} · ${percent}%`;
+    }
+    $("audiobookStatus").textContent = "Encoding M4B audiobook…";
+    const completed = await window.__TAURI__.core.invoke("finish_audiobook", {
+      id: audiobookId,
+    });
+    studio.stop();
+    studio.worker?.terminate();
+    await studio.ctx?.close();
+    const audiobook = {
+      id: completed.id,
+      docId: sourceDocument.id,
+      title: sourceDocument.title,
+      duration: completed.duration,
+      size: completed.size,
+      path: completed.path,
+      position: existing?.position || 0,
+      created: Date.now(),
+    };
+    await saveAudiobook(audiobook);
+    audiobookController = null;
+    await showExport();
+    toast("Your local M4B audiobook is ready.");
+  } catch (error) {
+    const cancelled = error.name === "AbortError";
+    studio.stop();
+    studio.worker?.terminate();
+    await studio.ctx?.close();
+    await window.__TAURI__.core
+      .invoke("cancel_audiobook", { id: audiobookId })
+      .catch(() => {});
+    audiobookController = null;
+    if (!cancelled) throw error;
+  }
+}
+
+async function showExport() {
   if (!current) return;
   const sourceFormat = documentFormat(current);
   const hasOriginal = sourceFormat !== "txt";
+  let audiobook = await getAudiobookForDocument(current.id);
+  if (audiobook && window.__TAURI__?.core && !audiobook.path) {
+    try {
+      audiobook.path = await window.__TAURI__.core.invoke(
+        "get_audiobook_path",
+        { id: audiobook.id },
+      );
+      await saveAudiobook(audiobook);
+    } catch {
+      audiobook = null;
+    }
+  }
+  const audiobookMarkup = audiobook
+    ? `<section class="audiobook-card"><div><strong>Local audiobook</strong><small>${Math.max(1, Math.round(audiobook.duration / 60)).toLocaleString()} min · ${(audiobook.size / 1024 / 1024).toFixed(1)} MB · M4B</small></div><audio id="audiobookPlayer" controls preload="metadata" src="${audiobookUrl(audiobook)}"></audio><div class="dialog-actions"><button class="secondary" id="rebuildAudiobook">Rebuild</button><button class="secondary" id="downloadAudiobook">Download .m4b</button></div></section>`
+    : `<button class="dialog-option" id="createAudiobook" ${window.__TAURI__?.core ? "" : "disabled"}>${icon("headphones")}<span><strong>Create complete audiobook (.m4b)</strong><small>All passages · local speech preparation · Kokoro narration · saved on this device</small></span>${icon("arrow")}</button>`;
   dialog(
     "Take your words with you.",
-    `<p class="dialog-copy">Export “${escape(current.title)}” in a format that fits your next step.</p><button class="dialog-option" id="exportText">${icon("file")}<span><strong>Plain text (.txt)</strong><small>The complete listening transcript, plus your notes</small></span>${icon("download")}</button>${hasOriginal ? `<button class="dialog-option" id="exportOriginal">${icon("file")}<span><strong>Original document (.${sourceFormat})</strong><small>Your source file, exactly as imported</small></span>${icon("download")}</button>` : ""}<button class="dialog-option" id="exportWav" ${!player.buffers.length ? "disabled" : ""}>${icon("voice")}<span><strong>Recorded audio (.wav)</strong><small>${player.buffers.length ? `${Math.round(player.recordedSeconds)} seconds from this playback session · up to 30 minutes` : "Available after playback with native desktop or neural voices"}</small></span>${icon("download")}</button><p class="hint">Audio includes passages played in the current session. Browser system speech cannot be recorded. Use Backup & import to export your entire library.</p>`,
+    `<p class="dialog-copy">Export “${escape(current.title)}” in a format that fits your next step.</p>${audiobookMarkup}<button class="dialog-option" id="exportText">${icon("file")}<span><strong>Plain text (.txt)</strong><small>The complete listening transcript, plus your notes</small></span>${icon("download")}</button>${hasOriginal ? `<button class="dialog-option" id="exportOriginal">${icon("file")}<span><strong>Original document (.${sourceFormat})</strong><small>Your source file, exactly as imported</small></span>${icon("download")}</button>` : ""}<button class="dialog-option" id="exportWav" ${!player.buffers.length ? "disabled" : ""}>${icon("voice")}<span><strong>Recorded session (.wav)</strong><small>${player.buffers.length ? `${Math.round(player.recordedSeconds)} seconds from this playback session · up to 30 minutes` : "Available after playback with native desktop or neural voices"}</small></span>${icon("download")}</button><p class="hint">M4B audiobooks include the complete imported PDF, EPUB, HTML, Markdown, or text book and remain in local app storage for playback. Session WAV contains only passages already played.</p>`,
     "KEEP SOMETHING GOOD",
   );
+  if ($("createAudiobook"))
+    $("createAudiobook").onclick = () => createAudiobook().catch(report);
+  if (audiobook) {
+    const audio = $("audiobookPlayer");
+    audio.onloadedmetadata = () => {
+      if (audiobook.position > 0 && audiobook.position < audio.duration)
+        audio.currentTime = audiobook.position;
+    };
+    audio.onplay = () => player.stop();
+    audio.ontimeupdate = () => {
+      clearTimeout(audiobookPositionTimer);
+      audiobookPositionTimer = setTimeout(() => {
+        audiobook = { ...audiobook, position: audio.currentTime };
+        saveAudiobook(audiobook).catch(report);
+      }, 800);
+    };
+    $("rebuildAudiobook").onclick = () =>
+      createAudiobook(audiobook).catch(report);
+    $("downloadAudiobook").onclick = async () => {
+      try {
+        const response = await fetch(audiobookUrl(audiobook));
+        if (!response.ok)
+          throw new Error("The local audiobook could not be read.");
+        download(await response.blob(), `${current.title}.m4b`);
+        toast("M4B audiobook downloaded.");
+      } catch (error) {
+        report(error);
+      }
+    };
+  }
   $("exportText").onclick = () => {
     download(
       new Blob(
@@ -1855,21 +2213,15 @@ async function restoreBackup(file) {
         try {
           if (parsed.numPages > 500)
             throw new Error("PDFs in backups must have 500 pages or fewer.");
-          let data;
-          try {
-            data = await parseDocumentWithEngine(`${doc.title}.pdf`, bytes);
-          } catch {
-            data = await parsePdfInBrowser(parsed);
-            data.parser = "pdfjs-fallback";
-          }
+          const data = await parsePdfInBrowser(parsed);
+          data.parser = "pdfjs";
           if (!data.segments.length)
             throw new Error("A PDF in this backup has no readable text.");
           doc.segments = data.segments;
           doc.pageCount = data.num_pages;
           doc.pdfPages = data.pages;
           doc.layoutParser = data.parser;
-          doc.pdfParserVersion =
-            data.parser === "docling" ? PDF_PARSER_VERSION : 2;
+          doc.pdfParserVersion = PDF_PARSER_VERSION;
           doc.minutes = minutes(
             data.segments.map((s) => s.original_text).join(" "),
           );
@@ -1877,7 +2229,7 @@ async function restoreBackup(file) {
           await parsed.destroy();
         }
       } else {
-        const data = await parseDocumentWithEngine(
+        const data = parseStructuredDocument(
           `${doc.title}.${sourceFormat}`,
           bytes,
         );
@@ -2077,6 +2429,29 @@ for (const id of ["passageList", "textContent"])
     if (target) return seek(Number(target.dataset.segment));
   });
 on("pdfPages", "click", (event) => {
+  const playLink = event.target.closest(".pdf-link-play[data-segment]");
+  if (playLink) {
+    event.preventDefault();
+    const index = Number(playLink.dataset.segment);
+    const wordIndex = Number(playLink.dataset.word);
+    const firstText =
+      playLink.dataset.firstText ||
+      (Number.isInteger(wordIndex)
+        ? (activeSegments[index]?.word_boxes || [])
+            .slice(wordIndex)
+            .map((word) => word.text)
+            .join(" ")
+        : "");
+    return seek(index, { autoplay: true, reveal: false, firstText });
+  }
+  const link = event.target.closest(".pdf-link-target");
+  if (link) {
+    event.preventDefault();
+    if (link.dataset.pdfUrl) return openPdfUrl(link.dataset.pdfUrl);
+    if (link.dataset.pdfPage !== undefined)
+      return goToPdfPage(Number(link.dataset.pdfPage));
+    return goToPdfDestination(link._pdfDestination, link.dataset.pdfAction);
+  }
   const target = event.target.closest(
     ".pdf-text-target[data-segment], .pdf-word-target[data-segment]",
   );
@@ -2275,15 +2650,14 @@ async function initialize() {
         id: storedDraft.id || null,
       };
     if (preferences) {
-      settings.engine = ["system", "neural", "mlx"].includes(preferences.engine)
-        ? preferences.engine
-        : "system";
+      settings.engine = preferences.engine === "system" ? "system" : "neural";
       settings.voice =
         typeof preferences.voice === "string" ? preferences.voice : "";
       settings.speed = [0.75, 1, 1.25, 1.5, 1.75, 2].includes(preferences.speed)
         ? preferences.speed
         : 1;
       settings.smart = preferences.smart !== false;
+      settings.llm = preferences.llm !== false;
     }
     $("speedSelect").value = settings.speed;
     $("smartCode").checked = settings.smart;
@@ -2302,86 +2676,60 @@ async function initialize() {
 }
 initialize();
 
-let modelDownload = null;
 async function showModels() {
   dialog(
-    "Local voice models",
-    `<p class="dialog-copy">Optional Apple Silicon acceleration. The Python engine runs separately on this device.</p><p class="dialog-status" id="modelStatus">Connecting to local engine…</p><div id="modelRows"></div><div class="dialog-actions"><button class="secondary" id="retryModels">Refresh</button><button class="primary" id="backToVoices">Voice preferences</button></div>`,
+    "Local speech model",
+    `<p class="dialog-copy">Qwen runs through a small native llama.cpp binary with Metal acceleration. Python is not installed or started.</p><p class="dialog-status" id="modelStatus">Checking local model…</p><div id="modelRows"></div><div class="dialog-actions"><button class="secondary" id="retryModels">Refresh</button><button class="primary" id="backToVoices">Voice preferences</button></div>`,
   );
   $("retryModels").onclick = () => showModels().catch(report);
   $("backToVoices").onclick = () => showSettings().catch(report);
   try {
-    const data = await (await engineRequest("/api/models/status")).json();
-    if (!$("modelRows")) return;
-    $("modelStatus").textContent =
-      data.active_download?.status === "downloading"
-        ? `Download in progress · ${data.active_download.percent || 0}%`
-        : "Local engine connected. Downloads stay on this device.";
-    $("modelRows").innerHTML = data.models
-      .map(
-        (model) =>
-          `<div class="model-row"><strong>${escape(model.name)}</strong><p class="hint">${escape(model.description)}</p><div class="model-actions"><small>${model.installed ? `Installed · ${escape(model.size_str)}` : `About ${model.size_mb} MB`}</small>${model.installed ? '<span class="status-tag">Installed</span>' : `<button class="secondary" data-model-download="${escape(model.id)}" ${data.active_download?.status === "downloading" ? "disabled" : ""}>Download</button>`}</div></div>`,
-      )
-      .join("");
-    if (data.active_download?.status === "downloading")
-      $("modelRows").insertAdjacentHTML(
-        "afterbegin",
-        '<button class="secondary" id="cancelModelDownload">Cancel download</button>',
+    if (!window.__TAURI__?.core)
+      throw new Error(
+        "Native model management is available in the desktop app.",
       );
-    if ($("cancelModelDownload"))
-      $("cancelModelDownload").onclick = () =>
-        cancelModelDownload().catch(report);
-    $("modelRows").onclick = (event) => {
-      const button = event.target.closest("[data-model-download]");
-      if (button)
-        startModelDownload(button.dataset.modelDownload).catch(report);
-    };
+    const data = await window.__TAURI__.core.invoke("native_llm_status");
+    if (!$("modelRows")) return;
+    $("modelStatus").textContent = data.installed
+      ? data.running
+        ? "Native model ready."
+        : "Installed · starting automatically when needed."
+      : "Optional model download · about 2.1 GB.";
+    $("modelRows").innerHTML =
+      `<div class="model-row"><strong>${escape(data.modelName)}</strong><p class="hint">Deterministic Q4 speech preparation on Apple Silicon Metal. Original passages remain unchanged.</p><div class="model-actions"><small>${data.installed ? `Installed · ${(data.size / 1024 / 1024 / 1024).toFixed(1)} GB` : "Not installed"}</small>${data.installed ? '<span class="status-tag">Installed</span>' : '<button class="secondary" id="downloadNativeLlm">Download</button>'}</div></div>`;
+    if ($("downloadNativeLlm"))
+      $("downloadNativeLlm").onclick = () => startModelDownload().catch(report);
   } catch (error) {
     if ($("modelStatus")) $("modelStatus").textContent = error.message;
   }
 }
 async function cancelModelDownload() {
-  await engineRequest("/api/models/cancel", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  modelDownload?.abort();
-  modelDownload = null;
+  await window.__TAURI__.core.invoke("cancel_native_llm_download");
   toast("Model download cancelled.");
-  await showModels();
 }
-async function startModelDownload(id) {
-  if (modelDownload) return;
-  modelDownload = new AbortController();
+async function startModelDownload() {
   if ($("modelRows"))
     $("modelRows").innerHTML =
       '<button class="secondary" id="cancelModelDownload">Cancel download</button>';
   if ($("cancelModelDownload"))
     $("cancelModelDownload").onclick = () =>
       cancelModelDownload().catch(report);
+  let unlisten;
   try {
-    const response = await engineRequest("/api/models/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model_id: id }),
-      signal: modelDownload.signal,
-    });
-    await readEvents(response, (event) => {
-      if (event.status === "error")
-        throw new Error(
-          event.message || "Model download failed. Retry when connected.",
-        );
-      if ($("modelStatus"))
-        $("modelStatus").textContent =
-          event.status === "completed"
-            ? "Model downloaded."
-            : `Downloading · ${event.percent || 0}%`;
-    });
-    if ($("modelStatus")) await showModels();
-  } catch (error) {
-    if (error.name !== "AbortError") throw error;
+    unlisten = await window.__TAURI__.event.listen(
+      "native-llm-download",
+      ({ payload }) => {
+        if ($("modelStatus"))
+          $("modelStatus").textContent =
+            `Downloading native model · ${payload.percent || 0}%`;
+      },
+    );
+    await window.__TAURI__.core.invoke("download_native_llm");
+    if ($("modelStatus")) {
+      toast("Native speech model installed.");
+      await showModels();
+    }
   } finally {
-    modelDownload = null;
+    unlisten?.();
   }
 }

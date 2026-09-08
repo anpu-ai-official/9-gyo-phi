@@ -1,9 +1,11 @@
 [package]
 name = "nine-gyo-phi"
-version = "0.2.0"
-description = "A private listening library for PDFs, notes, and ideas"
+version = "0.3.0"
+description = "A private, local-first document reader and audiobook studio"
 authors = ["9-gyo-phi contributors"]
 license = "MIT"
+repository = "https://github.com/anpu-ai-official/9-gyo-phi"
+homepage = "https://github.com/anpu-ai-official/9-gyo-phi"
 edition = "2021"
 
 [lib]
@@ -11,14 +13,17 @@ name = "nine_gyo_phi_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.0.0-rc.13", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.0.0-rc.17", features = [] }
-tauri-plugin-log = "2.0.0-rc"
+tauri = { version = "2.11", features = ["protocol-asset"] }
+tauri-plugin-log = "2.9"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip", "brotli", "deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip", "brotli", "deflate", "json"] }
 url = "2.5"
+sha2 = "0.10"
+kokoro-en = { git = "https://github.com/pguso/kokoro.git", rev = "b42bd5cf915163607cb51984cabf273dcf09755e", default-features = false, features = ["misaki-lean"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
