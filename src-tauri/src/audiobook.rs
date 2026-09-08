@@ -21,8 +21,10 @@ fn adts_payload(frame: Vec<u8>) -> Result<Vec<u8>, String> {
 }
 
 fn pcm_bytes_to_samples(bytes: &[u8]) -> Vec<i16> {
-    bytes
-        .chunks_exact(2)
+    let (samples, remainder) = bytes.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    samples
+        .iter()
         .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
         .collect()
 }
