@@ -21,7 +21,9 @@ import base64
 import asyncio
 import threading
 import math
+import multiprocessing
 import webbrowser
+from urllib.parse import unquote
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Dict, Any, Tuple, Optional
@@ -46,8 +48,17 @@ import mlx.core as mx
 from mlx_audio.tts.utils import load_model
 import pymupdf
 from verbalizer import verbalize_segment, verbalize_rule_based, llm_engine
+from document_parser import docling_available, parse_with_docling
 
 def _resolve_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        # Packaged (PyInstaller) build: there is no adjacent src/ tree to find,
+        # and the bundle's own Resources folder isn't writable. Use a stable
+        # per-user directory for the model manager's scratch/static files.
+        app_support = Path.home() / "Library" / "Application Support" / "9-gyo-phi"
+        app_support.mkdir(parents=True, exist_ok=True)
+        return app_support
+
     direct = Path(__file__).resolve().parent.parent
     if (direct / "src" / "static").exists():
         return direct
@@ -178,8 +189,8 @@ def merge_pipeline_results(results, sample_rate):
         audio_parts.append(audio)
         for token in result.tokens or []:
             tokens.append(SimpleNamespace(text=token.text, whitespace=token.whitespace,
-                                          start_ts=token.start_ts + offset,
-                                          end_ts=token.end_ts + offset))
+                                          start_ts=None if token.start_ts is None else token.start_ts + offset,
+                                          end_ts=None if token.end_ts is None else token.end_ts + offset))
         offset += len(audio) / sample_rate
     return SimpleNamespace(output=SimpleNamespace(audio=np.concatenate(audio_parts)), tokens=tokens)
 
@@ -304,6 +315,36 @@ def parse_pdf_document(pdf_bytes: bytes) -> Dict[str, Any]:
     sentence_end_pattern = re.compile(r'[.?!…]$')
     seg_id = 0
 
+    page_dicts = []
+    marginal_pages: Dict[str, set] = {}
+
+    def normalize_marginal(text: str) -> str:
+        return re.sub(r'\s+', ' ', re.sub(r'\d+', '#', text.lower())).strip()
+
+    for page_idx in range(total_pages):
+        page = doc[page_idx]
+        ph = page.rect.height
+        page_dict = page.get_text("dict")
+        page_dicts.append(page_dict)
+        seen = set()
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                if line["bbox"][1] > ph * 0.09 and line["bbox"][3] < ph * 0.91:
+                    continue
+                line_text = " ".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                key = normalize_marginal(line_text)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                marginal_pages.setdefault(key, set()).add(page_idx)
+
+    repeat_threshold = max(2, math.ceil(total_pages * 0.5))
+    repeated_marginals = {
+        text for text, pages in marginal_pages.items() if len(pages) >= repeat_threshold
+    }
+
     for page_idx in range(total_pages):
         page = doc[page_idx]
         pw, ph = page.rect.width, page.rect.height
@@ -313,15 +354,15 @@ def parse_pdf_document(pdf_bytes: bytes) -> Dict[str, Any]:
             "height": round(ph, 1)
         })
 
-        d = page.get_text("dict")
+        d = page_dicts[page_idx]
         raw_lines = []
 
         for b in d.get("blocks", []):
             if b.get("type") == 0:
                 for l in b.get("lines", []):
-                    if (l["bbox"][1] < ph * 0.04 or l["bbox"][3] > ph * 0.96) and len(l.get("spans", [])) == 1:
-                        span_text = l["spans"][0].get("text", "").strip()
-                        if span_text.isdigit() or len(span_text) < 4:
+                    if l["bbox"][1] < ph * 0.09 or l["bbox"][3] > ph * 0.91:
+                        margin_text = " ".join(s.get("text", "") for s in l.get("spans", [])).strip()
+                        if re.match(r'^\s*(?:page\s*)?\d+(?:\s*(?:of|/)\s*\d+)?\s*$', margin_text, re.I) or normalize_marginal(margin_text) in repeated_marginals:
                             continue
 
                     line_words = []
@@ -365,6 +406,7 @@ def parse_pdf_document(pdf_bytes: bytes) -> Dict[str, Any]:
 
         ordered_lines = recursive_xy_cut(raw_lines)
         curr_prose_words = []
+        prev_line_y0 = None
         prev_line_y1 = None
 
         def flush_prose():
@@ -417,8 +459,10 @@ def parse_pdf_document(pdf_bytes: bytes) -> Dict[str, Any]:
             if prev_line_y1 is not None:
                 gap = line_bbox[1] - prev_line_y1
                 line_height = line_bbox[3] - line_bbox[1]
-                if gap > max(8.0, line_height * 1.3):
+                moved_to_next_column = line_bbox[1] + line_height < prev_line_y0
+                if gap > max(8.0, line_height * 1.3) or moved_to_next_column:
                     flush_prose()
+            prev_line_y0 = line_bbox[1]
             prev_line_y1 = line_bbox[3]
 
             if is_code:
@@ -478,7 +522,9 @@ async def health(request):
         "status": "ok",
         "model": active_model_id,
         "installed": tts_installed,
-        "size": size_str
+        "size": size_str,
+        "layout_engine": "docling" if docling_available() else "fallback",
+        "layout_engine_available": docling_available(),
     })
 
 class ModelDownloadManager:
@@ -866,6 +912,45 @@ async def pdf_parse_endpoint(request):
         traceback.print_exc()
         return JSONResponse({"error": f"Failed to parse PDF: {str(e)}"}, status_code=500)
 
+
+async def document_parse_endpoint(request):
+    """Parse PDF, EPUB, HTML or Markdown into one semantic reading model."""
+    try:
+        document_bytes = await request.body()
+        filename = unquote(request.headers.get("x-document-name", "document"))
+        extension = Path(filename).suffix.lower().lstrip(".")
+        if extension not in {"pdf", "epub", "html", "htm", "xhtml", "md", "markdown"}:
+            return JSONResponse({"error": "Choose a PDF, EPUB, HTML, or Markdown document"}, status_code=400)
+        if not document_bytes:
+            return JSONResponse({"error": "The document is empty"}, status_code=400)
+        limit = 25 * 1024 * 1024 if extension == "pdf" else 100 * 1024 * 1024
+        if len(document_bytes) > limit:
+            return JSONResponse({"error": f"The document exceeds the {limit // 1024 // 1024} MB limit"}, status_code=413)
+        if not docling_available():
+            return JSONResponse(
+                {"error": "The advanced Docling layout engine is not available in this engine build"},
+                status_code=503,
+            )
+        page_range = None
+        if extension == "pdf" and request.headers.get("x-page-start"):
+            page_start = int(request.headers["x-page-start"])
+            page_end = int(request.headers.get("x-page-end", page_start))
+            if page_start < 1 or page_end < page_start or page_end - page_start > 24:
+                return JSONResponse({"error": "Invalid PDF page range"}, status_code=400)
+            page_range = (page_start, page_end)
+        data = await run_in_threadpool(
+            parse_with_docling,
+            document_bytes,
+            filename,
+            page_range,
+        )
+        return JSONResponse(data)
+    except Exception as error:
+        import traceback
+
+        traceback.print_exc()
+        return JSONResponse({"error": f"Document layout analysis failed: {error}"}, status_code=422)
+
 async def verbalize_endpoint(request):
     try:
         data = await request.json()
@@ -956,9 +1041,13 @@ async def stream_tts(request):
                 duration = float(len(trimmed_audio) / model.sample_rate)
 
                 sentences_meta = []
-                if res.tokens:
+                timed_tokens = [
+                    token for token in (res.tokens or [])
+                    if token.start_ts is not None and token.end_ts is not None
+                ]
+                if timed_tokens:
                     curr = []
-                    for t in res.tokens:
+                    for t in timed_tokens:
                         curr.append(t)
                         if t.text in ['.', '!', '?', '...']:
                             s_text = ''.join(tok.text + (' ' if tok.whitespace else '') for tok in curr).strip()
@@ -1215,6 +1304,7 @@ app = Starlette(
         Route("/api/models/delete", delete_model_endpoint, methods=["POST"]),
         Route("/api/stream", stream_tts, methods=["POST"]),
         Route("/api/verbalize", verbalize_endpoint, methods=["POST"]),
+        Route("/api/documents/parse", document_parse_endpoint, methods=["POST"]),
         Route("/api/pdf/parse", pdf_parse_endpoint, methods=["POST"]),
         Route("/api/pdf/stream", stream_pdf_segments, methods=["POST"]),
         Mount("/static", app=StaticFiles(directory=STATIC_DIR)),
@@ -1235,6 +1325,7 @@ def init_and_warmup():
     print(f"\033[1;32m[9-gyo-phi TTS]\033[0m Model ready & warmed up in {time.time()-t0:.2f}s!")
 
 def main():
+    multiprocessing.freeze_support()
     import argparse
     parser = argparse.ArgumentParser(description="Start 9-gyo-phi Engine")
     parser.add_argument("port", nargs="?", type=int, default=None, help="Port to listen on (default: 8765)")

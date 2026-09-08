@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   getPdfBytes,
+  getDocumentBytes,
   saveDocument,
   listDocuments,
   saveSetting,
@@ -25,6 +26,24 @@ test("document data, binary PDF, bookmarks and position survive storage roundtri
   assert.deepEqual(await getPdfBytes(doc.id), pdfBytes);
   await saveDocument({ ...metadata, position: 5 });
   assert.deepEqual(await getPdfBytes(doc.id), pdfBytes);
+});
+
+test("structured source bytes survive storage independently from metadata", async () => {
+  const sourceBytes = Uint8Array.from([80, 75, 3, 4]).buffer;
+  const doc = {
+    id: crypto.randomUUID(),
+    kind: "text",
+    title: "An EPUB",
+    text: "Chapter one.",
+    sourceFormat: "epub",
+    sourceBytes,
+  };
+  await saveDocument(doc);
+  assert.deepEqual(await getDocumentBytes(doc.id), sourceBytes);
+  assert.equal(
+    (await listDocuments()).find((item) => item.id === doc.id).sourceBytes,
+    undefined,
+  );
 });
 test("soft deletion and restore preserve document contents", async () => {
   let doc = {

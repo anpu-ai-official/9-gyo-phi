@@ -1,0 +1,4 @@
+# Build-only tooling for packaging the optional engine into the desktop app
+# (see scripts/build_engine.sh). Not needed to just run engine/server.py.
+-r requirements.txt
+pyinstaller>=6.22,<7

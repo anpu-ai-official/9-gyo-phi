@@ -31,6 +31,17 @@ def generate_synthetic_pdf():
     page.insert_text((220, 260), "Listing 1.1 - The C Program", fontsize=12)
     return doc.tobytes()
 
+
+def generate_repeated_margin_pdf():
+    doc = pymupdf.open()
+    for number in (1, 2):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 22), "Journal of Examples", fontsize=9)
+        page.insert_text((72, 100), f"Body sentence {number}.", fontsize=11)
+        page.insert_text((72, 782), "Confidential", fontsize=9)
+        page.insert_text((300, 782), str(number), fontsize=9)
+    return doc.tobytes()
+
 class TestPDFParserContract:
     def test_parse_returns_expected_schema(self):
         pdf_bytes = generate_synthetic_pdf()
@@ -92,3 +103,11 @@ class TestPDFParserContract:
         code_segs = [s for s in result["segments"] if s["is_code"]]
         assert len(code_segs) > 0
         assert any("open brace" in s["speech_text"] for s in code_segs)
+
+    def test_repeated_headers_footers_and_page_numbers_are_ignored(self):
+        result = parse_pdf_document(generate_repeated_margin_pdf())
+        transcript = " ".join(segment["original_text"] for segment in result["segments"])
+        assert "Body sentence 1." in transcript
+        assert "Body sentence 2." in transcript
+        assert "Journal of Examples" not in transcript
+        assert "Confidential" not in transcript

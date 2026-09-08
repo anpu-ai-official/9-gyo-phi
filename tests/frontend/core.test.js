@@ -5,6 +5,9 @@ import {
   splitText,
   textSegments,
   validateDocument,
+  normalizeListeningUrl,
+  decodeUrlSourceEnvelope,
+  inferUrlSourceFormat,
   History,
   wavBytes,
 } from "../../src/static/core.js";
@@ -13,6 +16,69 @@ import {
   recursiveXYCut,
   parsePdfInBrowser,
 } from "../../src/static/parser.js";
+
+test("listening URLs accept public web and local file sources", () => {
+  assert.equal(
+    normalizeListeningUrl("example.com/article#comments"),
+    "https://example.com/article",
+  );
+  assert.equal(
+    normalizeListeningUrl("/Users/example/My Notes/read me.md"),
+    "file:///Users/example/My%20Notes/read%20me.md",
+  );
+  assert.throws(() => normalizeListeningUrl("javascript:alert(1)"));
+  assert.throws(() => normalizeListeningUrl("https://name:secret@example.com"));
+  assert.throws(() =>
+    normalizeListeningUrl("file://another-computer/article.html"),
+  );
+});
+
+test("native URL envelopes preserve metadata and raw document bytes", () => {
+  const source = new TextEncoder().encode(
+    "<!doctype html><title>A read</title>",
+  );
+  const metadata = new TextEncoder().encode(
+    JSON.stringify({
+      finalUrl: "https://example.com/read",
+      filename: "read",
+      contentType: "text/html",
+      size: source.length,
+    }),
+  );
+  const envelope = new Uint8Array(4 + metadata.length + source.length);
+  new DataView(envelope.buffer).setUint32(0, metadata.length, false);
+  envelope.set(metadata, 4);
+  envelope.set(source, 4 + metadata.length);
+  const decoded = decodeUrlSourceEnvelope(envelope.buffer);
+  assert.equal(decoded.metadata.filename, "read");
+  assert.deepEqual(decoded.bytes, source);
+  assert.equal(
+    inferUrlSourceFormat(
+      decoded.metadata.finalUrl,
+      decoded.metadata.contentType,
+      decoded.bytes,
+    ),
+    "html",
+  );
+});
+
+test("URL format inference trusts document signatures over misleading URLs", () => {
+  assert.equal(
+    inferUrlSourceFormat(
+      "https://example.com/download",
+      "application/octet-stream",
+      new TextEncoder().encode("%PDF-1.7"),
+    ),
+    "pdf",
+  );
+  assert.throws(() =>
+    inferUrlSourceFormat(
+      "https://example.com/archive.bin",
+      "application/octet-stream",
+      Uint8Array.from([0, 1, 2]),
+    ),
+  );
+});
 
 test("speech chunking preserves all words and bounds long passages", () => {
   const text =
@@ -61,6 +127,39 @@ test("backup schema normalizes metadata and allocates independent identities", (
   assert.equal(doc.deleted, undefined);
   assert.equal(doc.favorite, true);
 });
+test("structured ebook metadata supports long extracted text safely", () => {
+  const doc = validateDocument({
+    kind: "text",
+    title: "A local book",
+    text: "chapter ".repeat(20000),
+    sourceFormat: "epub",
+    sourceSize: 1024,
+    layoutParser: "docling",
+    editable: false,
+  });
+  assert.equal(doc.sourceFormat, "epub");
+  assert.equal(doc.layoutParser, "docling");
+  assert.equal(doc.editable, false);
+});
+test("source URLs survive document validation without credentials or fragments", () => {
+  const doc = validateDocument({
+    kind: "text",
+    title: "A web article",
+    text: "A useful article.",
+    sourceFormat: "html",
+    sourceUrl: "https://example.com/read#discussion",
+  });
+  assert.equal(doc.sourceUrl, "https://example.com/read");
+  assert.throws(() =>
+    validateDocument({
+      kind: "text",
+      title: "Bad source",
+      text: "text",
+      sourceFormat: "html",
+      sourceUrl: "data:text/html,hello",
+    }),
+  );
+});
 test("destructive edits support undo, redo, and branching", () => {
   const history = new History(2);
   history.push("original");
@@ -100,6 +199,36 @@ test("code rules speak standard headers and leave plain prose unchanged", () => 
     verbalizeRuleBasedNative("A quiet place to listen.").text,
     "A quiet place to listen.",
   );
+});
+test("code rules describe common function signatures as a human would", () => {
+  const expected =
+    "function definition for a function named func with two arguments x and y";
+  assert.equal(verbalizeRuleBasedNative("def func(x, y):").text, expected);
+  assert.equal(
+    verbalizeRuleBasedNative("function func(x, y) {").text,
+    expected,
+  );
+  assert.equal(
+    verbalizeRuleBasedNative("int func(int x, float y);").text,
+    expected,
+  );
+  assert.equal(
+    verbalizeRuleBasedNative("def ready():").text,
+    "function definition for a function named ready with no arguments",
+  );
+});
+test("code rules describe static assertions without an open-ended LLM answer", () => {
+  assert.equal(
+    verbalizeRuleBasedNative("static_assert(sizeof(void*) == 8);").text,
+    "static assertion requiring size of void pointer equals 8 to be true at compile time",
+  );
+});
+test("punctuation-only cleanup leaves complex code available for the LLM", () => {
+  const result = verbalizeRuleBasedNative(
+    "foo<T>(bar, [](auto x) { return x.value(); });",
+  );
+  assert.equal(result.transformed, false);
+  assert.equal(result.text, "foo<T>(bar, [](auto x) { return x.value(); });");
 });
 test("spatial column order stays column-major", () => {
   const lines = [
@@ -143,6 +272,52 @@ test("PDF parser produces coordinates, original text and segments", async () => 
   assert.equal(data.segments.length, 2);
   assert.equal(data.segments[0].original_text, "A real sentence.");
   assert.ok(data.segments[0].boxes[0].x >= 0);
+  assert.deepEqual(
+    data.segments[0].word_boxes.map((word) => word.text),
+    ["A", "real", "sentence."],
+  );
+  assert.ok(data.segments[0].word_boxes.every((word) => word.w > 0));
+});
+
+test("PDF parser orders aligned columns and removes repeated margins", async () => {
+  const item = (str, x, y, width = 90) => ({
+    str,
+    transform: [12, 0, 0, 12, x, y],
+    height: 12,
+    width,
+    fontName: "Times",
+  });
+  const pages = [1, 2].map((number) => ({
+    getViewport: () => ({ width: 600, height: 800 }),
+    getTextContent: async () => ({
+      items: [
+        item("Journal of Examples", 50, 790, 130),
+        item(`Left ${number}A.`, 50, 700),
+        item(`Right ${number}A.`, 330, 700),
+        item(`Left ${number}B.`, 50, 670),
+        item(`Right ${number}B.`, 330, 670),
+        item("Confidential", 50, 10),
+        item(String(number), 300, 10, 10),
+      ],
+    }),
+  }));
+  const data = await parsePdfInBrowser({
+    numPages: pages.length,
+    getPage: async (number) => pages[number - 1],
+  });
+  assert.deepEqual(
+    data.segments.map((segment) => segment.original_text),
+    [
+      "Left 1A.",
+      "Left 1B.",
+      "Right 1A.",
+      "Right 1B.",
+      "Left 2A.",
+      "Left 2B.",
+      "Right 2A.",
+      "Right 2B.",
+    ],
+  );
 });
 
 test("speech segmentation preserves code, decimals, URLs, and trailing punctuation", () => {

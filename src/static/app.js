@@ -2,6 +2,11 @@ import { engineRequest, readEvents } from "./engine.js";
 import {
   MAX_TEXT,
   MAX_PDF,
+  MAX_DOCUMENT,
+  STRUCTURED_FORMATS,
+  normalizeListeningUrl,
+  decodeUrlSourceEnvelope,
+  inferUrlSourceFormat,
   words,
   minutes,
   textSegments,
@@ -9,7 +14,7 @@ import {
   History,
 } from "./core.js";
 import {
-  getPdfBytes,
+  getDocumentBytes,
   listDocuments,
   saveDocument,
   getSetting,
@@ -20,6 +25,7 @@ import { parsePdfInBrowser, verbalizeRuleBasedNative } from "./parser.js";
 import { Player } from "./audio.js";
 
 const $ = (id) => document.getElementById(id);
+const PDF_PARSER_VERSION = 3;
 const paths = {
   plus: "M12 5v14M5 12h14",
   library: "M4 4v16h4V4ZM12 4v16M16 4l4 15",
@@ -51,6 +57,7 @@ const paths = {
   voice: "M5 9v6M9 5v14M13 2v20M17 6v12M21 10v4",
   close: "m6 6 12 12M6 18 18 6",
   file: "M5 3h9l5 5v13H5ZM14 3v6h5M8 13h8M8 17h5",
+  link: "M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1",
   check: "m5 12 4 4L19 6",
   refresh: "M20 8a8 8 0 1 0 0 8M20 3v5h-5",
 };
@@ -122,9 +129,13 @@ let docs = [],
   activePdfBytes = null,
   pdfPage = 0,
   pdfScale = 1,
-  renderTask = null,
+  pdfRenderTasks = new Map(),
+  renderedPdfPages = new Set(),
+  pdfSegmentsByPage = new Map(),
+  pdfScrollFrame = 0,
   openGeneration = 0,
-  pageGeneration = 0;
+  pageGeneration = 0,
+  layoutController = null;
 let draft = { title: "", text: "", id: null },
   draftTimer,
   draftRevision = 0,
@@ -173,6 +184,7 @@ async function persist(doc, notify = false) {
   $("saveStatus").textContent = "Saving…";
   await saveDocument(doc);
   delete doc.pdfBytes;
+  delete doc.sourceBytes;
   $("saveStatus").textContent = "All changes saved";
   if (notify) toast("Saved to your library.");
 }
@@ -229,6 +241,34 @@ function changeView(next) {
   }
   window.scrollTo({ top: 0 });
 }
+function documentFormat(doc) {
+  const format = doc.sourceFormat || (doc.kind === "pdf" ? "pdf" : "txt");
+  if (["html", "htm", "xhtml"].includes(format)) return "html";
+  if (format === "markdown") return "md";
+  return format;
+}
+function documentTypeLabel(doc) {
+  const format = documentFormat(doc);
+  return format === "txt"
+    ? "TEXT DOCUMENT"
+    : `${format.toUpperCase()} DOCUMENT`;
+}
+function documentMeasure(doc) {
+  return doc.kind === "pdf"
+    ? `${doc.pageCount} pages`
+    : `${words(doc.text || "").toLocaleString()} words`;
+}
+function sourceDescription(doc) {
+  if (!doc.sourceUrl) return "Saved on this device";
+  try {
+    const url = new URL(doc.sourceUrl);
+    return url.protocol === "file:"
+      ? "From a local file · saved on this device"
+      : `From ${url.hostname} · saved on this device`;
+  } catch {
+    return "Saved on this device";
+  }
+}
 function renderLibrary() {
   $("libraryCount").textContent = docs.filter((d) => !d.deleted).length;
   let collection = docs.filter((d) =>
@@ -250,7 +290,8 @@ function renderLibrary() {
     view === "trash" ? "RESTORE WHENEVER YOU NEED" : "YOUR PERSONAL COLLECTION";
   collection = collection.filter(
     (d) =>
-      (filter === "all" || d.kind === filter) &&
+      (filter === "all" ||
+        (filter === "pdf" ? d.kind === "pdf" : d.kind !== "pdf")) &&
       `${d.title} ${d.text || ""} ${d.notes || ""}`
         .toLocaleLowerCase()
         .includes(query.toLocaleLowerCase()),
@@ -269,7 +310,7 @@ function renderLibrary() {
         progress = doc.completed
           ? 100
           : Math.round(((doc.position || 0) / count) * 100);
-      return `<article class="document-card" data-id="${escape(doc.id)}"><button class="card-cover" data-action="open" data-color="${index % 3}" aria-label="Open ${escape(doc.title)}"><span class="card-type">${doc.kind === "pdf" ? "PDF DOCUMENT" : "TEXT DOCUMENT"}</span><span class="cover-ring"></span><span class="cover-book">${icon(doc.kind === "pdf" ? "file" : "voice")}</span></button>${!doc.deleted ? `<button class="icon-button card-favorite ${doc.favorite ? "is-favorite" : ""}" data-action="favorite" aria-label="${doc.favorite ? "Unfavorite" : "Favorite"} ${escape(doc.title)}" aria-pressed="${!!doc.favorite}">${icon("star")}</button>` : ""}<div class="card-body"><button class="card-title" data-action="open" title="${escape(doc.title)}">${escape(doc.title)}</button><div class="card-meta"><span>${doc.kind === "pdf" ? `${doc.pageCount} pages` : `${words(doc.text).toLocaleString()} words`}</span><span>·</span><span>${doc.minutes || minutes(doc.text || "")} min listen</span></div><div class="card-bottom"><button class="text-button" data-action="${doc.deleted ? "restore" : "open"}">${icon(doc.deleted ? "undo" : "play")}${doc.deleted ? "Restore document" : doc.completed ? "Read again" : doc.position > 0 ? "Continue reading" : "Start reading"}</button><div>${!doc.deleted ? `<button class="icon-button" data-action="rename" aria-label="Rename ${escape(doc.title)}">${icon("edit")}</button><button class="icon-button" data-action="delete" aria-label="Delete ${escape(doc.title)}">${icon("trash")}</button>` : ""}</div></div></div><div class="card-progress"><span style="width:${progress}%"></span></div></article>`;
+      return `<article class="document-card" data-id="${escape(doc.id)}"><button class="card-cover" data-action="open" data-color="${index % 3}" aria-label="Open ${escape(doc.title)}"><span class="card-type">${documentTypeLabel(doc)}</span><span class="cover-ring"></span><span class="cover-book">${icon(doc.kind === "pdf" ? "file" : "voice")}</span></button>${!doc.deleted ? `<button class="icon-button card-favorite ${doc.favorite ? "is-favorite" : ""}" data-action="favorite" aria-label="${doc.favorite ? "Unfavorite" : "Favorite"} ${escape(doc.title)}" aria-pressed="${!!doc.favorite}">${icon("star")}</button>` : ""}<div class="card-body"><button class="card-title" data-action="open" title="${escape(doc.title)}">${escape(doc.title)}</button><div class="card-meta"><span>${documentMeasure(doc)}</span><span>·</span><span>${doc.minutes || minutes(doc.text || "")} min listen</span></div><div class="card-bottom"><button class="text-button" data-action="${doc.deleted ? "restore" : "open"}">${icon(doc.deleted ? "undo" : "play")}${doc.deleted ? "Restore document" : doc.completed ? "Read again" : doc.position > 0 ? "Continue reading" : "Start reading"}</button><div>${!doc.deleted ? `<button class="icon-button" data-action="rename" aria-label="Rename ${escape(doc.title)}">${icon("edit")}</button><button class="icon-button" data-action="delete" aria-label="Delete ${escape(doc.title)}">${icon("trash")}</button>` : ""}</div></div></div><div class="card-progress"><span style="width:${progress}%"></span></div></article>`;
     })
     .join("");
   $("emptyState").hidden = collection.length > 0;
@@ -309,23 +350,115 @@ async function addTemplate(key) {
 function showImport() {
   dialog(
     "What would you like to read?",
-    `<p class="dialog-copy">Bring a PDF, a text file, or a fresh thought. Everything is saved privately on this device.</p><button class="dialog-option" id="chooseFiles">${icon("file")}<span><strong>Import from your device</strong><small>PDF, TXT, or Markdown · up to 25 MB per PDF</small></span>${icon("arrow")}</button><button class="dialog-option" id="writeInstead">${icon("edit")}<span><strong>Write or paste text</strong><small>A clean page for your next idea</small></span>${icon("arrow")}</button><p class="hint">PDFs need selectable text. Scanned pages require OCR in another app first.</p>`,
+    `<p class="dialog-copy">Bring a book, article, PDF, or fresh thought. Everything is saved privately on this device.</p><button class="dialog-option" id="chooseFiles">${icon("file")}<span><strong>Import from your device</strong><small>PDF, EPUB, HTML, Markdown, or TXT</small></span>${icon("arrow")}</button><button class="dialog-option" id="chooseUrl">${icon("link")}<span><strong>Listen from a URL</strong><small>Web articles or local file:/// links</small></span>${icon("arrow")}</button><button class="dialog-option" id="writeInstead">${icon("edit")}<span><strong>Write or paste text</strong><small>A clean page for your next idea</small></span>${icon("arrow")}</button><p class="hint">Advanced local layout analysis preserves headings, lists, columns, tables, and code while removing page furniture.</p>`,
   );
   $("chooseFiles").onclick = () => {
     closeDialog();
     $("fileInput").click();
   };
+  $("chooseUrl").onclick = showUrlImport;
   $("writeInstead").onclick = () => {
     closeDialog();
     newDraft();
   };
+}
+function showUrlImport() {
+  dialog(
+    "Listen from a URL",
+    `<form id="urlImportForm"><label class="dialog-field">Website or local file URL<input id="urlInput" type="text" inputmode="url" autocomplete="url" spellcheck="false" maxlength="4096" placeholder="https://example.com/article" aria-describedby="urlImportHint"></label><p class="hint" id="urlImportHint">Use an internet address or a local link such as <code>file:///Users/you/Documents/article.html</code>. The app saves a private local copy for listening offline.</p><div class="dialog-actions"><button class="secondary" type="button" id="backToImport">Back</button><button class="primary" type="submit">Import URL</button></div></form>`,
+    "FROM LINK TO LISTENING",
+  );
+  $("backToImport").onclick = showImport;
+  $("urlImportForm").onsubmit = (event) => {
+    event.preventDefault();
+    importUrl($("urlInput").value).catch(report);
+  };
+  $("urlInput").focus();
+}
+function urlFilename(name, format) {
+  let filename;
+  try {
+    filename = decodeURIComponent(String(name || ""));
+  } catch {
+    filename = String(name || "");
+  }
+  filename = filename
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\u0000-\u001f:]/g, "-")
+    .trim();
+  const extension = filename.includes(".")
+    ? filename.split(".").pop().toLowerCase()
+    : "";
+  const equivalent =
+    extension === format ||
+    (["html", "htm", "xhtml"].includes(extension) &&
+      ["html", "htm", "xhtml"].includes(format)) ||
+    (["md", "markdown"].includes(extension) &&
+      ["md", "markdown"].includes(format));
+  if (equivalent) return filename.slice(0, 180);
+  const stem = filename.replace(/\.[^.]+$/, "").slice(0, 160) || "web-document";
+  return `${stem}.${format}`;
+}
+function htmlDocumentTitle(bytes) {
+  try {
+    const html = new TextDecoder().decode(bytes.subarray(0, 1024 * 1024));
+    return new DOMParser()
+      .parseFromString(html, "text/html")
+      .querySelector("title")
+      ?.textContent?.replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+  } catch {
+    return "";
+  }
+}
+async function importUrl(value) {
+  if (busyImport) throw new Error("An import is already in progress.");
+  if (!window.__TAURI__?.core)
+    throw new Error("URL imports are available in the desktop app.");
+  const requestedUrl = normalizeListeningUrl(value);
+  closeDialog();
+  $("addDocument").disabled = true;
+  $("heroImport").disabled = true;
+  $("saveStatus").textContent =
+    new URL(requestedUrl).protocol === "file:"
+      ? "Opening local URL…"
+      : "Downloading article…";
+  try {
+    const envelope = await window.__TAURI__.core.invoke("load_url_source", {
+      rawUrl: requestedUrl,
+    });
+    const { metadata, bytes } = decodeUrlSourceEnvelope(envelope);
+    const format = inferUrlSourceFormat(
+      metadata.finalUrl || requestedUrl,
+      metadata.contentType,
+      bytes,
+    );
+    const filename = urlFilename(metadata.filename, format);
+    const preferredTitle = ["html", "htm", "xhtml"].includes(format)
+      ? htmlDocumentTitle(bytes)
+      : "";
+    await importFiles(
+      [new File([bytes], filename, { type: metadata.contentType })],
+      {
+        sourceUrl: metadata.finalUrl || requestedUrl,
+        preferredTitle,
+      },
+    );
+  } finally {
+    $("addDocument").disabled = false;
+    $("heroImport").disabled = false;
+    if ($("saveStatus").textContent !== "All changes saved")
+      $("saveStatus").textContent = "All changes saved";
+  }
 }
 function newDraft() {
   // Keep an existing autosaved draft until the user explicitly clears it.
   changeView("writer");
   $("draftTitle").focus();
 }
-async function importFiles(files) {
+async function importFiles(files, options = {}) {
   if (busyImport) return toast("An import is already in progress.");
   if (!files.length) return;
   if (files.length > 20) throw new Error("Import up to 20 files at a time.");
@@ -338,21 +471,38 @@ async function importFiles(files) {
   for (const file of files) {
     try {
       const extension = file.name.split(".").pop().toLowerCase();
-      if (!["pdf", "txt", "md"].includes(extension))
-        throw new Error("Choose a PDF, TXT, or Markdown file.");
+      if (
+        ![
+          "pdf",
+          "epub",
+          "html",
+          "htm",
+          "xhtml",
+          "md",
+          "markdown",
+          "txt",
+        ].includes(extension)
+      )
+        throw new Error("Choose a PDF, EPUB, HTML, Markdown, or TXT file.");
       if (!file.size)
         throw new Error("This file is empty. Add some text and try again.");
       if (extension === "pdf" && file.size > MAX_PDF)
         throw new Error(
           "PDFs must be 25 MB or smaller. Split this document and try again.",
         );
-      if (extension !== "pdf" && file.size > MAX_TEXT * 4)
+      if (extension === "txt" && file.size > MAX_TEXT * 4)
         throw new Error(
           "Text files must contain fewer than 100,000 characters.",
         );
-      $("saveStatus").textContent = `Importing ${file.name}…`;
+      if (STRUCTURED_FORMATS.has(extension) && file.size > MAX_DOCUMENT)
+        throw new Error(
+          "EPUB, HTML, and Markdown documents must be 100 MB or smaller.",
+        );
+      $("saveStatus").textContent = `Understanding ${file.name}…`;
       const title =
-        file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "Untitled document";
+        options.preferredTitle ||
+        file.name.replace(/\.[^.]+$/, "").slice(0, 120) ||
+        "Untitled document";
       let doc;
       if (extension === "pdf") {
         const bytes = await file.arrayBuffer();
@@ -367,25 +517,65 @@ async function importFiles(files) {
               "Import a PDF of 500 pages or fewer. Split longer books into chapters.",
             );
           const data = await parsePdfInBrowser(parsed);
+          data.parser = "pdfjs-fallback";
           if (!data.segments.length)
             throw new Error(
               "No readable text was found. Run OCR on this PDF and import it again.",
             );
-          doc = validateDocument({ title, kind: "pdf" });
+          doc = validateDocument({
+            title,
+            kind: "pdf",
+            sourceUrl: options.sourceUrl || "",
+          });
           doc.pdfBytes = bytes;
           doc.pdfSize = bytes.byteLength;
+          doc.sourceFormat = "pdf";
+          doc.sourceSize = bytes.byteLength;
+          doc.layoutParser = data.parser;
           doc.segments = data.segments;
           doc.pageCount = data.num_pages;
+          doc.pdfPages = data.pages;
+          doc.pdfParserVersion =
+            data.parser === "docling" ? PDF_PARSER_VERSION : 2;
           doc.minutes = minutes(
             data.segments.map((s) => s.original_text).join(" "),
           );
         } finally {
           await parsed.destroy();
         }
-      } else {
+      } else if (extension === "txt") {
         const text = await file.text();
-        doc = validateDocument({ title, kind: "text", text });
+        doc = validateDocument({
+          title,
+          kind: "text",
+          text,
+          sourceFormat: "txt",
+          editable: true,
+          sourceUrl: options.sourceUrl || "",
+        });
         doc.segments = textSegments(text);
+        doc.minutes = minutes(text);
+      } else {
+        const bytes = await file.arrayBuffer();
+        const data = await parseDocumentWithEngine(file.name, bytes);
+        const text = data.segments
+          .map((segment) => segment.original_text)
+          .join("\n\n")
+          .trim();
+        doc = validateDocument({
+          title,
+          kind: "text",
+          text,
+          sourceFormat: extension,
+          sourceSize: bytes.byteLength,
+          layoutParser: data.parser,
+          editable: false,
+          sourceUrl: options.sourceUrl || "",
+        });
+        doc.sourceBytes = bytes;
+        doc.segments = data.segments;
+        doc.segmentVersion = 3;
+        doc.pageCount = data.num_pages || 0;
         doc.minutes = minutes(text);
       }
       await persist(doc);
@@ -440,6 +630,168 @@ async function loadPdf(bytes) {
     isEvalSupported: false,
   }).promise;
 }
+
+async function parseDocumentWithEngine(
+  filename,
+  bytes,
+  { pageStart, pageEnd, signal } = {},
+) {
+  const headers = {
+    "Content-Type": "application/octet-stream",
+    "X-Document-Name": encodeURIComponent(filename),
+  };
+  if (pageStart) headers["X-Page-Start"] = String(pageStart);
+  if (pageEnd) headers["X-Page-End"] = String(pageEnd);
+  const response = await engineRequest("/api/documents/parse", {
+    method: "POST",
+    headers,
+    body: bytes,
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(15 * 60 * 1000)])
+      : AbortSignal.timeout(15 * 60 * 1000),
+  });
+  const data = await response.json();
+  if (!Array.isArray(data.segments) || !data.segments.length)
+    throw new Error("The layout engine found no readable content.");
+  return data;
+}
+
+function equivalentPosition(previousSegments, nextSegments, position) {
+  const previous = previousSegments[position];
+  if (previous) {
+    const exact = nextSegments.findIndex(
+      (segment) =>
+        segment.page === previous.page &&
+        segment.original_text === previous.original_text,
+    );
+    if (exact >= 0) return exact;
+    const samePage = nextSegments.findIndex(
+      (segment) => segment.page === previous.page,
+    );
+    if (samePage >= 0) return samePage;
+  }
+  return Math.min(
+    Math.max(0, nextSegments.length - 1),
+    Math.max(
+      0,
+      Math.round(
+        (position / Math.max(1, previousSegments.length - 1)) *
+          Math.max(0, nextSegments.length - 1),
+      ),
+    ),
+  );
+}
+
+function attachPdfWordBoxes(advancedSegments, fastSegments) {
+  const wordsByPage = new Map();
+  for (const segment of fastSegments) {
+    if (!Array.isArray(segment.word_boxes)) continue;
+    if (!wordsByPage.has(segment.page)) wordsByPage.set(segment.page, []);
+    wordsByPage.get(segment.page).push(...segment.word_boxes);
+  }
+  const normalized = (value) =>
+    value.toLocaleLowerCase().replace(/^\W+|\W+$/g, "");
+  for (const segment of advancedSegments) {
+    const wanted = new Set(
+      segment.original_text.split(/\s+/).map(normalized).filter(Boolean),
+    );
+    const words = (wordsByPage.get(segment.page) || [])
+      .filter((word) => {
+        const centerX = word.x + word.w / 2;
+        const centerY = word.y + word.h / 2;
+        const inside = (segment.boxes || []).some(
+          (box) =>
+            centerX >= box.x - 0.5 &&
+            centerX <= box.x + box.w + 0.5 &&
+            centerY >= box.y - 0.5 &&
+            centerY <= box.y + box.h + 0.5,
+        );
+        return (
+          inside &&
+          (segment.is_code ||
+            !normalized(word.text) ||
+            wanted.has(normalized(word.text)))
+        );
+      })
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+    if (words.length) segment.word_boxes = words;
+  }
+}
+
+async function improvePdfLayout(doc, bytes, totalPages, generation) {
+  const controller = new AbortController();
+  layoutController = controller;
+  let enhanced = Array.isArray(doc.layoutSegments) ? doc.layoutSegments : [];
+  let startPage = Math.max(1, (doc.layoutPagesDone || 0) + 1);
+  try {
+    for (; startPage <= totalPages; startPage += 12) {
+      const endPage = Math.min(totalPages, startPage + 11);
+      if (controller.signal.aborted || generation !== openGeneration) return;
+      if (current?.id === doc.id && player.state === "idle")
+        $("playerDetail").textContent =
+          `Improving layout in background · ${startPage - 1} / ${totalPages} pages`;
+      const batch = await parseDocumentWithEngine(
+        `${doc.title || "document"}.pdf`,
+        bytes,
+        {
+          pageStart: startPage,
+          pageEnd: endPage,
+          signal: controller.signal,
+        },
+      );
+      attachPdfWordBoxes(batch.segments, doc.segments || []);
+      enhanced = enhanced
+        .filter(
+          (segment) =>
+            segment.page < startPage - 1 || segment.page > endPage - 1,
+        )
+        .concat(batch.segments)
+        .sort((a, b) => a.page - b.page || a.id - b.id)
+        .map((segment, id) => ({ ...segment, id }));
+      doc.layoutSegments = enhanced;
+      doc.layoutPagesDone = endPage;
+      doc.layoutParser = "docling-progress";
+      await persist(doc);
+    }
+
+    const previousSegments = doc.segments || [];
+    const nextPosition = equivalentPosition(
+      previousSegments,
+      enhanced,
+      doc.position || 0,
+    );
+    doc.pdfParserVersion = PDF_PARSER_VERSION;
+    doc.layoutParser = "docling";
+    doc.minutes = minutes(
+      enhanced.map((segment) => segment.original_text).join(" "),
+    );
+    delete doc.layoutSegments;
+    delete doc.layoutPagesDone;
+
+    if (
+      current?.id === doc.id &&
+      generation === openGeneration &&
+      ["idle", "finished", "error"].includes(player.state)
+    ) {
+      doc.segments = enhanced;
+      doc.position = nextPosition;
+      activeSegments = enhanced;
+      player.index = nextPosition;
+      pdfPage = activeSegments[nextPosition]?.page || pdfPage;
+      $("positionRange").max = Math.max(0, enhanced.length - 1);
+      renderPassages();
+      await renderPdfDocument({ keepPage: pdfPage });
+      updatePlayer({ state: "idle", index: nextPosition });
+      toast("Advanced reading order is ready.");
+    } else {
+      doc.pendingLayoutSegments = enhanced;
+      doc.pendingLayoutPosition = nextPosition;
+    }
+    await persist(doc);
+  } finally {
+    if (layoutController === controller) layoutController = null;
+  }
+}
 async function openDocument(id) {
   const doc = docs.find((d) => d.id === id);
   if (!doc) return;
@@ -449,15 +801,28 @@ async function openDocument(id) {
   }
   if (view === "reader") await persistNotes();
   player.stop();
+  layoutController?.abort();
+  layoutController = null;
   const generation = ++openGeneration;
   ++pageGeneration;
-  renderTask?.cancel();
+  for (const task of pdfRenderTasks.values()) task.cancel();
+  pdfRenderTasks.clear();
+  renderedPdfPages.clear();
+  cancelAnimationFrame(pdfScrollFrame);
+  $("pdfPages").replaceChildren();
   if (pdf) {
     await pdf.destroy();
     pdf = null;
   }
   player.buffers = [];
   player.recordedSeconds = 0;
+  if (Array.isArray(doc.pendingLayoutSegments)) {
+    doc.segments = doc.pendingLayoutSegments;
+    doc.position = doc.pendingLayoutPosition || 0;
+    delete doc.pendingLayoutSegments;
+    delete doc.pendingLayoutPosition;
+    await persist(doc);
+  }
   current = doc;
   currentIsDraft = false;
   activeSegments = doc.segments || textSegments(doc.text);
@@ -469,13 +834,12 @@ async function openDocument(id) {
   pdfScale = 1;
   pdfPage = activeSegments[doc.position]?.page || 0;
   $("readerTitle").textContent = doc.title;
-  $("readerKind").textContent =
-    doc.kind === "pdf" ? "PDF DOCUMENT" : "TEXT DOCUMENT";
+  $("readerKind").textContent = documentTypeLabel(doc);
   $("readerMeta").textContent =
-    `${doc.kind === "pdf" ? `${doc.pageCount} pages` : `${words(doc.text).toLocaleString()} words`} · ${doc.minutes || minutes(doc.text || "")} min listen · Saved on this device`;
+    `${documentMeasure(doc)} · ${doc.minutes || minutes(doc.text || "")} min listen · ${sourceDescription(doc)}`;
   $("documentNotes").value = doc.notes || "";
   $("passageSearch").value = "";
-  $("editDocument").hidden = doc.kind !== "text";
+  $("editDocument").hidden = doc.kind !== "text" || doc.editable === false;
   $("pdfToolbar").hidden = doc.kind !== "pdf";
   $("pdfViewport").hidden = doc.kind !== "pdf";
   $("textContent").hidden = doc.kind === "pdf";
@@ -492,7 +856,7 @@ async function openDocument(id) {
   if (doc.kind === "pdf") {
     $("playerDetail").textContent = "Opening PDF…";
     try {
-      activePdfBytes = await getPdfBytes(doc.id);
+      activePdfBytes = await getDocumentBytes(doc.id);
       if (!activePdfBytes)
         throw new Error(
           "The saved PDF could not be found. Reimport the original file.",
@@ -503,8 +867,20 @@ async function openDocument(id) {
         return;
       }
       pdf = loaded;
-      await renderPdfPage();
+      await renderPdfDocument();
       updatePlayer({ state: "idle", index: doc.position });
+      if ((doc.pdfParserVersion || 0) < PDF_PARSER_VERSION)
+        improvePdfLayout(doc, activePdfBytes, pdf.numPages, generation).catch(
+          () => {
+            if (
+              current?.id === doc.id &&
+              generation === openGeneration &&
+              player.state === "idle"
+            )
+              $("playerDetail").textContent =
+                "Ready · fast reading order active";
+          },
+        );
     } catch (error) {
       report(error);
       $("playerDetail").textContent =
@@ -512,52 +888,270 @@ async function openDocument(id) {
     }
   }
 }
-async function renderPdfPage() {
+function updatePdfToolbar() {
   if (!pdf) return;
-  const generation = ++pageGeneration;
-  renderTask?.cancel();
-  const page = await pdf.getPage(pdfPage + 1);
-  if (generation !== pageGeneration) return;
-  const width = Math.max(250, $("readingPaper").clientWidth - 26),
-    viewport = page.getViewport({
-      scale: (width / page.getViewport({ scale: 1 }).width) * pdfScale,
-    });
-  const density = Math.min(window.devicePixelRatio || 1, 2),
-    canvas = $("pdfCanvas");
-  canvas.width = Math.floor(viewport.width * density);
-  canvas.height = Math.floor(viewport.height * density);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
-  $("pdfCanvasWrap").style.width = canvas.style.width;
   $("pageNumber").textContent = `${pdfPage + 1} / ${pdf.numPages}`;
   $("prevPage").disabled = pdfPage === 0;
   $("nextPage").disabled = pdfPage === pdf.numPages - 1;
   $("zoomReset").textContent = `${Math.round(pdfScale * 100)}%`;
   $("zoomOut").disabled = pdfScale <= 0.75;
   $("zoomIn").disabled = pdfScale >= 2;
-  renderTask = page.render({
+}
+
+async function getPdfPageMetadata() {
+  if (current?.pdfPages?.length === pdf.numPages) return current.pdfPages;
+  const pages = [];
+  for (let index = 0; index < pdf.numPages; index++) {
+    const page = await pdf.getPage(index + 1);
+    const viewport = page.getViewport({ scale: 1 });
+    pages.push({ page: index, width: viewport.width, height: viewport.height });
+  }
+  if (current) current.pdfPages = pages;
+  return pages;
+}
+
+function pdfSegmentLabel(segment) {
+  const text = segment.original_text?.replace(/\s+/g, " ").trim() || "passage";
+  return `Read from here: ${text.slice(0, 120)}`;
+}
+
+async function renderPdfDocument({ keepPage = pdfPage } = {}) {
+  if (!pdf) return;
+  const generation = ++pageGeneration;
+  for (const task of pdfRenderTasks.values()) task.cancel();
+  pdfRenderTasks.clear();
+  renderedPdfPages.clear();
+  const pages = await getPdfPageMetadata();
+  if (generation !== pageGeneration) return;
+
+  pdfSegmentsByPage = new Map();
+  activeSegments.forEach((segment, index) => {
+    if (!pdfSegmentsByPage.has(segment.page))
+      pdfSegmentsByPage.set(segment.page, []);
+    pdfSegmentsByPage.get(segment.page).push({ segment, index });
+  });
+  const width = Math.max(250, $("readingPaper").clientWidth - 26) * pdfScale;
+  const fragment = document.createDocumentFragment();
+  for (const meta of pages) {
+    const shell = document.createElement("section");
+    shell.className = "pdf-page";
+    shell.dataset.page = meta.page;
+    shell.setAttribute("aria-label", `Page ${meta.page + 1}`);
+    shell.style.width = `${width}px`;
+    shell.style.height = `${width * (meta.height / meta.width)}px`;
+
+    const canvas = document.createElement("canvas");
+    canvas.setAttribute("aria-hidden", "true");
+    shell.append(canvas);
+    const placeholder = document.createElement("span");
+    placeholder.className = "pdf-page-placeholder";
+    placeholder.textContent = `Page ${meta.page + 1}`;
+    shell.append(placeholder);
+    const layer = document.createElement("div");
+    layer.className = "pdf-text-layer";
+    layer.dataset.page = meta.page;
+    shell.append(layer);
+    fragment.append(shell);
+  }
+  $("pdfPages").replaceChildren(fragment);
+  pdfPage = Math.max(0, Math.min(pdf.numPages - 1, keepPage));
+  updatePdfToolbar();
+  renderPdfHighlights();
+  requestAnimationFrame(() => {
+    if (generation !== pageGeneration) return;
+    scrollToPdfPage(pdfPage, "instant");
+    renderVisiblePdfPages();
+  });
+}
+
+function populatePdfTextTargets(index) {
+  const layer = $("pdfPages").querySelector(
+    `.pdf-text-layer[data-page="${index}"]`,
+  );
+  if (!layer || layer.dataset.populated === "true") return;
+  const fragment = document.createDocumentFragment();
+  for (const { segment, index: segmentIndex } of pdfSegmentsByPage.get(index) ||
+    []) {
+    for (const [boxIndex, box] of (segment.boxes || []).entries()) {
+      const target = document.createElement("button");
+      target.type = "button";
+      target.className = `pdf-text-target${segmentIndex === player.index ? " active" : ""}`;
+      target.dataset.segment = segmentIndex;
+      if (boxIndex === 0)
+        target.setAttribute("aria-label", pdfSegmentLabel(segment));
+      else {
+        target.tabIndex = -1;
+        target.setAttribute("aria-hidden", "true");
+      }
+      target.title = "Read from here";
+      target.style.left = `${box.x}%`;
+      target.style.top = `${box.y}%`;
+      target.style.width = `${box.w}%`;
+      target.style.height = `${box.h}%`;
+      fragment.append(target);
+    }
+    for (const [wordIndex, box] of (segment.word_boxes || []).entries()) {
+      const target = document.createElement("button");
+      target.type = "button";
+      target.className = "pdf-word-target";
+      target.dataset.segment = segmentIndex;
+      target.dataset.word = wordIndex;
+      target.tabIndex = -1;
+      target.setAttribute("aria-hidden", "true");
+      target.title = `Read from “${box.text}”`;
+      target.style.left = `${box.x}%`;
+      target.style.top = `${box.y}%`;
+      target.style.width = `${box.w}%`;
+      target.style.height = `${box.h}%`;
+      fragment.append(target);
+    }
+  }
+  layer.append(fragment);
+  layer.dataset.populated = "true";
+}
+
+async function renderPdfPage(index, generation = pageGeneration) {
+  if (
+    !pdf ||
+    generation !== pageGeneration ||
+    renderedPdfPages.has(index) ||
+    pdfRenderTasks.has(index)
+  )
+    return;
+  const shell = $("pdfPages").querySelector(`[data-page="${index}"]`);
+  if (!shell) return;
+  populatePdfTextTargets(index);
+  const page = await pdf.getPage(index + 1);
+  if (generation !== pageGeneration) return;
+  const base = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: shell.clientWidth / base.width });
+  const density = Math.min(window.devicePixelRatio || 1, 2);
+  const canvas = shell.querySelector("canvas");
+  canvas.width = Math.floor(viewport.width * density);
+  canvas.height = Math.floor(viewport.height * density);
+  const task = page.render({
     canvasContext: canvas.getContext("2d"),
     viewport,
     transform: [density, 0, 0, density, 0, 0],
   });
+  pdfRenderTasks.set(index, task);
   try {
-    await renderTask.promise;
+    await task.promise;
+    if (generation === pageGeneration) {
+      renderedPdfPages.add(index);
+      shell.classList.add("rendered");
+    }
   } catch (error) {
     if (error.name !== "RenderingCancelledException") throw error;
+  } finally {
+    if (pdfRenderTasks.get(index) === task) pdfRenderTasks.delete(index);
   }
-  if (generation === pageGeneration) renderPdfHighlights();
 }
+
+function renderVisiblePdfPages() {
+  if (!pdf) return;
+  const viewportRect = $("pdfViewport").getBoundingClientRect();
+  $("pdfPages")
+    .querySelectorAll(".pdf-page")
+    .forEach((shell) => {
+      const rect = shell.getBoundingClientRect(),
+        index = Number(shell.dataset.page);
+      if (
+        rect.bottom >= viewportRect.top - 700 &&
+        rect.top <= viewportRect.bottom + 900
+      )
+        renderPdfPage(index).catch(report);
+      else if (
+        rect.bottom < viewportRect.top - 2100 ||
+        rect.top > viewportRect.bottom + 2500
+      ) {
+        pdfRenderTasks.get(index)?.cancel();
+        pdfRenderTasks.delete(index);
+        renderedPdfPages.delete(index);
+        shell.classList.remove("rendered");
+        const canvas = shell.querySelector("canvas"),
+          layer = shell.querySelector(".pdf-text-layer");
+        canvas.width = 1;
+        canvas.height = 1;
+        layer.replaceChildren();
+        delete layer.dataset.populated;
+      }
+    });
+}
+
+function syncPdfPageFromScroll() {
+  const viewportRect = $("pdfViewport").getBoundingClientRect();
+  const center = viewportRect.top + viewportRect.height / 2;
+  let nearest = pdfPage,
+    distance = Infinity;
+  $("pdfPages")
+    .querySelectorAll(".pdf-page")
+    .forEach((shell) => {
+      const rect = shell.getBoundingClientRect();
+      const candidate = Math.abs((rect.top + rect.bottom) / 2 - center);
+      if (candidate < distance) {
+        distance = candidate;
+        nearest = Number(shell.dataset.page);
+      }
+    });
+  pdfPage = nearest;
+  updatePdfToolbar();
+  renderVisiblePdfPages();
+}
+
+function scrollToPdfPage(index, behavior = "smooth") {
+  const shell = $("pdfPages").querySelector(`[data-page="${index}"]`);
+  if (!shell) return;
+  const container = $("pdfViewport");
+  container.scrollTo({
+    top: shell.offsetTop - $("pdfPages").offsetTop,
+    behavior,
+  });
+}
+
+function revealPdfSegment(index, behavior = "smooth") {
+  const page = activeSegments[index]?.page;
+  if (Number.isInteger(page)) populatePdfTextTargets(page);
+  const target = $("pdfPages").querySelector(`[data-segment="${index}"]`);
+  if (!target) return;
+  const container = $("pdfViewport"),
+    containerRect = container.getBoundingClientRect(),
+    targetRect = target.getBoundingClientRect();
+  if (
+    targetRect.top < containerRect.top ||
+    targetRect.bottom > containerRect.bottom
+  )
+    container.scrollTo({
+      top:
+        container.scrollTop +
+        targetRect.top -
+        containerRect.top -
+        container.clientHeight / 3,
+      behavior,
+    });
+}
+
 function renderPdfHighlights() {
-  const segment = activeSegments[player.index];
-  $("pdfHighlights").innerHTML =
-    segment?.page === pdfPage
-      ? (segment.boxes || [])
-          .map(
-            (box) =>
-              `<span class="pdf-highlight" style="left:${box.x}%;top:${box.y}%;width:${box.w}%;height:${box.h}%"></span>`,
-          )
-          .join("")
-      : "";
+  $("pdfPages")
+    .querySelectorAll(".pdf-text-target.active")
+    .forEach((target) => target.classList.remove("active"));
+  $("pdfPages")
+    .querySelectorAll(`[data-segment="${player.index}"]`)
+    .forEach((target) => target.classList.add("active"));
+}
+function segmentRole(segment) {
+  return [
+    "heading",
+    "paragraph",
+    "list-item",
+    "code",
+    "formula",
+    "table",
+    "caption",
+    "footnote",
+  ].includes(segment?.role)
+    ? segment.role
+    : "paragraph";
 }
 function renderPassages() {
   const search = $("passageSearch").value.toLowerCase();
@@ -576,7 +1170,7 @@ function renderPassages() {
     ? visible
         .map(
           ({ segment, index }) =>
-            `<button class="passage-item ${index === player.index ? "active" : ""}" data-segment="${index}" ${index === player.index ? 'aria-current="true"' : ""}>${current?.bookmarks?.includes(index) ? icon("bookmark") : `<small>${index + 1}</small>`}<span>${escape(segment.original_text)}</span></button>`,
+            `<button class="passage-item role-${segmentRole(segment)} ${index === player.index ? "active" : ""}" data-segment="${index}" ${index === player.index ? 'aria-current="true"' : ""}>${current?.bookmarks?.includes(index) ? icon("bookmark") : `<small>${index + 1}</small>`}<span>${escape(segment.original_text)}</span></button>`,
         )
         .join("")
     : '<p class="hint">No matching passages.</p>';
@@ -593,7 +1187,7 @@ function renderPassages() {
       .slice(start, end)
       .map(
         (segment, offset) =>
-          `<button class="passage ${start + offset === player.index ? "active" : ""}" data-segment="${start + offset}" ${start + offset === player.index ? 'aria-current="true"' : ""}>${escape(segment.original_text)}</button>`,
+          `<button class="passage role-${segmentRole(segment)} ${start + offset === player.index ? "active" : ""}" data-segment="${start + offset}" ${start + offset === player.index ? 'aria-current="true"' : ""}>${escape(segment.original_text)}</button>`,
       )
       .join("");
   }
@@ -677,10 +1271,15 @@ function updatePlayer({ state, index, detail }) {
           });
       }
     }
-    if (pdf && activeSegments[index]?.page !== pdfPage && playing) {
-      pdfPage = activeSegments[index].page;
-      renderPdfPage().catch(report);
-    } else renderPdfHighlights();
+    if (pdf) {
+      const activePage = activeSegments[index]?.page;
+      if (Number.isInteger(activePage) && activePage !== pdfPage && playing) {
+        pdfPage = activePage;
+        updatePdfToolbar();
+      }
+      renderPdfHighlights();
+      if (playing) revealPdfSegment(index);
+    }
   }
   if (state === "error")
     toast(detail, { label: "Voice settings", run: showSettings }, true);
@@ -690,13 +1289,36 @@ function playbackOptions() {
     engine: settings.engine,
     voice: settings.voice,
     speed: settings.speed,
-    transform: (segment) =>
-      settings.smart
-        ? segment.original_text
-            .split("\n")
-            .map((line) => verbalizeRuleBasedNative(line).text || line)
-            .join(" ")
-        : segment.original_text,
+    transform: async (segment, { signal } = {}) => {
+      if (!settings.smart) return segment.original_text;
+      let transformed = false;
+      const local = segment.original_text
+        .split("\n")
+        .map((line) => {
+          const result = verbalizeRuleBasedNative(line);
+          transformed ||= result.transformed;
+          return result.text || line;
+        })
+        .join(" ");
+      if (!segment.is_code || transformed || settings.engine !== "mlx")
+        return local;
+      try {
+        const response = await engineRequest("/api/verbalize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: segment.original_text,
+            is_code: true,
+            use_llm: true,
+          }),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(120000)]),
+        });
+        const result = await response.json();
+        return result.speech_text || local;
+      } catch {
+        return local;
+      }
+    },
   };
 }
 async function playToggle() {
@@ -711,18 +1333,27 @@ async function playToggle() {
     await player.play(activeSegments, player.index, playbackOptions());
   }
 }
-async function seek(index) {
+async function seek(
+  index,
+  { autoplay = false, reveal = true, firstText = "" } = {},
+) {
   index = Math.max(0, Math.min(activeSegments.length - 1, index));
-  const resume = ["playing", "loading"].includes(player.state);
+  const resume = autoplay || ["playing", "loading"].includes(player.state);
   player.stop();
   player.index = index;
   if (current) current.completed = false;
   updatePlayer({ state: "idle", index });
   if (pdf) {
     pdfPage = activeSegments[index].page;
-    await renderPdfPage();
+    updatePdfToolbar();
+    renderPdfHighlights();
+    if (reveal) revealPdfSegment(index);
   }
-  if (resume) await player.play(activeSegments, index, playbackOptions());
+  if (resume)
+    await player.play(activeSegments, index, {
+      ...playbackOptions(),
+      firstText,
+    });
 }
 async function toggleFavorite(doc) {
   const old = doc.favorite;
@@ -1034,7 +1665,7 @@ function showShortcuts() {
 function showWelcome() {
   dialog(
     "A little more room to listen.",
-    `<img class="onboarding-mark" src="./static/brand.svg" width="70" height="70" alt="9-gyo-phi book and sound mark"><p class="dialog-copy">Welcome to your listening room. A quiet home for the words you want to spend more time with.</p><div class="welcome-lines"><div>${icon("file")}<span><strong>Bring your own words.</strong><br>Import a PDF, paste an article, or start a note.</span></div><div>${icon("headphones")}<span><strong>Find your rhythm.</strong><br>Choose a voice. Set the pace. Pick up where you left off.</span></div><div>${icon("shield")}<span><strong>Keep it yours.</strong><br>No account. Local storage. Export a backup anytime.</span></div></div><div class="dialog-actions"><button class="secondary" id="skipWelcome">Explore my library</button><button class="primary" id="welcomeSample">Try a 2-minute read ${icon("arrow")}</button></div>`,
+    `<img class="onboarding-mark" src="./static/brand.svg" width="70" height="70" alt="9-gyo-phi book and sound mark"><p class="dialog-copy">Welcome to your listening room. A quiet home for the words you want to spend more time with.</p><div class="welcome-lines"><div>${icon("file")}<span><strong>Bring your own words.</strong><br>Import a PDF, EPUB, HTML article, Markdown file, or start a note.</span></div><div>${icon("headphones")}<span><strong>Find your rhythm.</strong><br>Choose a voice. Set the pace. Pick up where you left off.</span></div><div>${icon("shield")}<span><strong>Keep it yours.</strong><br>No account. Local storage. Export a backup anytime.</span></div></div><div class="dialog-actions"><button class="secondary" id="skipWelcome">Explore my library</button><button class="primary" id="welcomeSample">Try a 2-minute read ${icon("arrow")}</button></div>`,
     "WELCOME TO 9-GYO-PHI",
   );
   const finish = async (sample) => {
@@ -1047,9 +1678,11 @@ function showWelcome() {
 }
 function showExport() {
   if (!current) return;
+  const sourceFormat = documentFormat(current);
+  const hasOriginal = sourceFormat !== "txt";
   dialog(
     "Take your words with you.",
-    `<p class="dialog-copy">Export “${escape(current.title)}” in a format that fits your next step.</p><button class="dialog-option" id="exportText">${icon("file")}<span><strong>Plain text (.txt)</strong><small>The complete original transcript, plus your notes</small></span>${icon("download")}</button>${current.kind === "pdf" ? `<button class="dialog-option" id="exportPdf">${icon("file")}<span><strong>Original document (.pdf)</strong><small>Your PDF, exactly as imported</small></span>${icon("download")}</button>` : ""}<button class="dialog-option" id="exportWav" ${!player.buffers.length ? "disabled" : ""}>${icon("voice")}<span><strong>Recorded audio (.wav)</strong><small>${player.buffers.length ? `${Math.round(player.recordedSeconds)} seconds from this playback session · up to 30 minutes` : "Available after playback with native desktop or neural voices"}</small></span>${icon("download")}</button><p class="hint">Audio includes passages played in the current session. Browser system speech cannot be recorded. Use Backup & import to export your entire library.</p>`,
+    `<p class="dialog-copy">Export “${escape(current.title)}” in a format that fits your next step.</p><button class="dialog-option" id="exportText">${icon("file")}<span><strong>Plain text (.txt)</strong><small>The complete listening transcript, plus your notes</small></span>${icon("download")}</button>${hasOriginal ? `<button class="dialog-option" id="exportOriginal">${icon("file")}<span><strong>Original document (.${sourceFormat})</strong><small>Your source file, exactly as imported</small></span>${icon("download")}</button>` : ""}<button class="dialog-option" id="exportWav" ${!player.buffers.length ? "disabled" : ""}>${icon("voice")}<span><strong>Recorded audio (.wav)</strong><small>${player.buffers.length ? `${Math.round(player.recordedSeconds)} seconds from this playback session · up to 30 minutes` : "Available after playback with native desktop or neural voices"}</small></span>${icon("download")}</button><p class="hint">Audio includes passages played in the current session. Browser system speech cannot be recorded. Use Backup & import to export your entire library.</p>`,
     "KEEP SOMETHING GOOD",
   );
   $("exportText").onclick = () => {
@@ -1064,13 +1697,29 @@ function showExport() {
     );
     toast("Text export downloaded.");
   };
-  if ($("exportPdf"))
-    $("exportPdf").onclick = () => {
-      download(
-        new Blob([activePdfBytes], { type: "application/pdf" }),
-        `${current.title}.pdf`,
-      );
-      toast("PDF export downloaded.");
+  if ($("exportOriginal"))
+    $("exportOriginal").onclick = async () => {
+      try {
+        const bytes = await getDocumentBytes(current.id);
+        if (!bytes)
+          throw new Error("The saved source file could not be found.");
+        download(
+          new Blob([bytes], {
+            type:
+              sourceFormat === "pdf"
+                ? "application/pdf"
+                : sourceFormat === "epub"
+                  ? "application/epub+zip"
+                  : sourceFormat === "html"
+                    ? "text/html"
+                    : "text/markdown",
+          }),
+          `${current.title}.${sourceFormat}`,
+        );
+        toast("Original document downloaded.");
+      } catch (error) {
+        report(error);
+      }
     };
   $("exportWav").onclick = () => {
     try {
@@ -1104,7 +1753,7 @@ async function exportBackup() {
     collection.reduce(
       (n, d) =>
         n +
-        (d.pdfSize || 0) * 1.34 +
+        (d.sourceSize || d.pdfSize || 0) * 1.34 +
         (d.text?.length || 0) * 4 +
         (d.notes?.length || 0) * 4,
       0,
@@ -1118,6 +1767,11 @@ async function exportBackup() {
   for (const doc of collection) {
     const item = {
       kind: doc.kind,
+      sourceFormat: documentFormat(doc),
+      sourceSize: doc.sourceSize || doc.pdfSize || 0,
+      layoutParser: doc.layoutParser || "",
+      sourceUrl: doc.sourceUrl || "",
+      editable: doc.editable !== false,
       title: doc.title,
       text: doc.text,
       notes: doc.notes,
@@ -1125,17 +1779,18 @@ async function exportBackup() {
       bookmarks: doc.bookmarks,
       position: doc.position,
     };
-    if (doc.kind === "pdf") {
-      const stored = await getPdfBytes(doc.id);
+    if (documentFormat(doc) !== "txt") {
+      const stored = await getDocumentBytes(doc.id);
       if (!stored)
         throw new Error(
-          `The PDF for ${doc.title} is missing. Reimport it before backing up.`,
+          `The source file for ${doc.title} is missing. Reimport it before backing up.`,
         );
       const bytes = new Uint8Array(stored);
       let binary = "";
       for (let i = 0; i < bytes.length; i += 8192)
         binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      item.pdf = btoa(binary);
+      item.source = btoa(binary);
+      if (doc.kind === "pdf") item.pdf = item.source;
     }
     items.push(item);
   }
@@ -1179,31 +1834,61 @@ async function restoreBackup(file) {
   const imported = [];
   for (const raw of backup.documents) {
     const doc = validateDocument(raw);
-    if (doc.kind === "pdf") {
-      if (typeof raw.pdf !== "string" || raw.pdf.length > MAX_PDF * 1.34)
-        throw new Error("The backup contains a missing or oversized PDF.");
+    const sourceFormat = documentFormat(doc);
+    if (sourceFormat !== "txt") {
+      const encoded = raw.source || (sourceFormat === "pdf" ? raw.pdf : null);
+      const sourceLimit = sourceFormat === "pdf" ? MAX_PDF : MAX_DOCUMENT;
+      if (typeof encoded !== "string" || encoded.length > sourceLimit * 1.34)
+        throw new Error(
+          "The backup contains a missing or oversized source document.",
+        );
       let bytes;
       try {
-        bytes = Uint8Array.from(atob(raw.pdf), (c) => c.charCodeAt(0)).buffer;
+        bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)).buffer;
       } catch {
-        throw new Error("The backup contains invalid PDF data.");
+        throw new Error("The backup contains invalid source document data.");
       }
-      const parsed = await loadPdf(bytes);
-      try {
-        if (parsed.numPages > 500)
-          throw new Error("PDFs in backups must have 500 pages or fewer.");
-        const data = await parsePdfInBrowser(parsed);
-        if (!data.segments.length)
-          throw new Error("A PDF in this backup has no readable text.");
-        doc.pdfBytes = bytes;
-        doc.pdfSize = bytes.byteLength;
-        doc.segments = data.segments;
-        doc.pageCount = data.num_pages;
-        doc.minutes = minutes(
-          data.segments.map((s) => s.original_text).join(" "),
+      doc.sourceBytes = bytes;
+      doc.sourceSize = bytes.byteLength;
+      if (sourceFormat === "pdf") {
+        const parsed = await loadPdf(bytes);
+        try {
+          if (parsed.numPages > 500)
+            throw new Error("PDFs in backups must have 500 pages or fewer.");
+          let data;
+          try {
+            data = await parseDocumentWithEngine(`${doc.title}.pdf`, bytes);
+          } catch {
+            data = await parsePdfInBrowser(parsed);
+            data.parser = "pdfjs-fallback";
+          }
+          if (!data.segments.length)
+            throw new Error("A PDF in this backup has no readable text.");
+          doc.segments = data.segments;
+          doc.pageCount = data.num_pages;
+          doc.pdfPages = data.pages;
+          doc.layoutParser = data.parser;
+          doc.pdfParserVersion =
+            data.parser === "docling" ? PDF_PARSER_VERSION : 2;
+          doc.minutes = minutes(
+            data.segments.map((s) => s.original_text).join(" "),
+          );
+        } finally {
+          await parsed.destroy();
+        }
+      } else {
+        const data = await parseDocumentWithEngine(
+          `${doc.title}.${sourceFormat}`,
+          bytes,
         );
-      } finally {
-        await parsed.destroy();
+        doc.segments = data.segments;
+        doc.segmentVersion = 3;
+        doc.text = data.segments
+          .map((segment) => segment.original_text)
+          .join("\n\n");
+        doc.layoutParser = data.parser;
+        doc.pageCount = data.num_pages || 0;
+        doc.minutes = minutes(doc.text);
       }
     } else {
       doc.segments = textSegments(doc.text);
@@ -1214,7 +1899,10 @@ async function restoreBackup(file) {
     imported.push(doc);
   }
   await importDocuments(imported);
-  imported.forEach((doc) => delete doc.pdfBytes);
+  imported.forEach((doc) => {
+    delete doc.pdfBytes;
+    delete doc.sourceBytes;
+  });
   $("saveStatus").textContent = "All changes saved";
   docs.unshift(...imported);
   changeView("library");
@@ -1388,6 +2076,30 @@ for (const id of ["passageList", "textContent"])
     const target = event.target.closest("[data-segment]");
     if (target) return seek(Number(target.dataset.segment));
   });
+on("pdfPages", "click", (event) => {
+  const target = event.target.closest(
+    ".pdf-text-target[data-segment], .pdf-word-target[data-segment]",
+  );
+  if (target) {
+    const index = Number(target.dataset.segment);
+    const wordIndex = Number(target.dataset.word);
+    const firstText = Number.isInteger(wordIndex)
+      ? (activeSegments[index]?.word_boxes || [])
+          .slice(wordIndex)
+          .map((word) => word.text)
+          .join(" ")
+      : "";
+    return seek(Number(target.dataset.segment), {
+      autoplay: true,
+      reveal: false,
+      firstText,
+    });
+  }
+});
+on("pdfViewport", "scroll", () => {
+  cancelAnimationFrame(pdfScrollFrame);
+  pdfScrollFrame = requestAnimationFrame(syncPdfPageFromScroll);
+});
 on("playButton", "click", playToggle);
 on("stopButton", "click", () => player.stop());
 on("previousPassage", "click", () => seek(player.index - 1));
@@ -1410,32 +2122,36 @@ on("smartCode", "change", async () => {
 on("prevPage", "click", async () => {
   if (pdfPage > 0) {
     pdfPage--;
-    await renderPdfPage();
+    updatePdfToolbar();
+    scrollToPdfPage(pdfPage);
+    renderVisiblePdfPages();
   }
 });
 on("nextPage", "click", async () => {
   if (pdf && pdfPage < pdf.numPages - 1) {
     pdfPage++;
-    await renderPdfPage();
+    updatePdfToolbar();
+    scrollToPdfPage(pdfPage);
+    renderVisiblePdfPages();
   }
 });
 on("zoomIn", "click", async () => {
   pdfScale = Math.min(2, Math.round((pdfScale + 0.25) * 100) / 100);
-  await renderPdfPage();
+  await renderPdfDocument();
 });
 on("zoomOut", "click", async () => {
   pdfScale = Math.max(0.75, pdfScale - 0.25);
-  await renderPdfPage();
+  await renderPdfDocument();
 });
 on("zoomReset", "click", async () => {
   pdfScale = 1;
-  await renderPdfPage();
+  await renderPdfDocument();
 });
 let resizeTimer;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (view === "reader" && pdf) renderPdfPage().catch(report);
+    if (view === "reader" && pdf) renderPdfDocument().catch(report);
   }, 180);
 });
 window.addEventListener("keydown", (event) => {
@@ -1534,7 +2250,10 @@ async function initialize() {
     );
     docs = storedDocs;
     const migratedText = docs.filter(
-      (doc) => doc.kind === "text" && doc.segmentVersion !== 2,
+      (doc) =>
+        doc.kind === "text" &&
+        (!doc.sourceFormat || doc.sourceFormat === "txt") &&
+        doc.segmentVersion !== 2,
     );
     for (const doc of migratedText) {
       doc.segments = textSegments(doc.text);

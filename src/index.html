@@ -182,7 +182,9 @@
             <div id="emptyState" class="empty-state" hidden>
               <span data-icon="library"></span>
               <h3>A home for your next idea.</h3>
-              <p>Add a PDF or save a note. We’ll keep your place.</p>
+              <p>
+                Add a PDF, EPUB, web article, or note. We’ll keep your place.
+              </p>
             </div>
             <div id="starterArea" class="starter-area">
               <div class="section-heading">
@@ -338,10 +340,7 @@
                   </button>
                 </div>
                 <div id="pdfViewport" hidden>
-                  <div id="pdfCanvasWrap">
-                    <canvas id="pdfCanvas"></canvas>
-                    <div id="pdfHighlights"></div>
-                  </div>
+                  <div id="pdfPages" aria-label="Scrollable PDF document"></div>
                 </div>
                 <div id="textContent" class="reading-text"></div>
               </div>
@@ -490,7 +489,7 @@
     <input
       type="file"
       id="fileInput"
-      accept=".pdf,.txt,.md,text/plain,application/pdf"
+      accept=".pdf,.epub,.html,.htm,.xhtml,.md,.markdown,.txt,text/plain,text/markdown,text/html,application/xhtml+xml,application/epub+zip,application/pdf"
       multiple
       hidden
     />

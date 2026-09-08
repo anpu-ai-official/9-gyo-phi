@@ -1,6 +1,7 @@
 node_modules/
 .venv/
 src-tauri/target/
+src-tauri/binaries/
 work/
 .coverage
 .pytest_cache/

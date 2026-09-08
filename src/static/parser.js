@@ -83,6 +83,67 @@ function cleanTokenSymbols(text) {
   return t.replace(/\s+/g, " ").trim();
 }
 
+const COUNT_WORDS = [
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+  "ten",
+];
+
+function splitParameters(source) {
+  const parameters = [];
+  let start = 0,
+    depth = 0,
+    quote = "";
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (quote) {
+      if (char === quote && source[i - 1] !== "\\") quote = "";
+    } else if ("\"'`".includes(char)) quote = char;
+    else if ("([{<".includes(char)) depth++;
+    else if (")]}>".includes(char)) depth = Math.max(0, depth - 1);
+    else if (char === "," && depth === 0) {
+      parameters.push(source.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const tail = source.slice(start).trim();
+  if (tail) parameters.push(tail);
+  return parameters;
+}
+
+function parameterName(parameter) {
+  let value = parameter
+    .replace(/\s*=.*$/, "")
+    .replace(/^\.\.\./, "")
+    .replace(/^\*+/, "")
+    .trim();
+  if (/^[A-Za-z_$][\w$]*\s*:/.test(value)) value = value.split(":", 1)[0];
+  const identifiers = value.match(/[A-Za-z_$][\w$]*/g) || [];
+  return identifiers.at(-1) || cleanTokenSymbols(value);
+}
+
+function describeFunction(name, parameters) {
+  const names = splitParameters(parameters)
+    .filter((parameter) => parameter && parameter !== "void")
+    .map(parameterName);
+  if (!names.length)
+    return `function definition for a function named ${name} with no arguments`;
+  const count = COUNT_WORDS[names.length] || String(names.length);
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return `function definition for a function named ${name} with ${count} argument${names.length === 1 ? "" : "s"} ${list}`;
+}
+
 function verbalizeRuleBasedNative(rawText) {
   const text = rawText ? rawText.trim() : "";
   if (!text) return { text: "", transformed: false, explanation: "" };
@@ -172,6 +233,57 @@ function verbalizeRuleBasedNative(rawText) {
     };
   }
 
+  m = text.match(/^\s*static_assert\s*\((.*)\)\s*;?\s*$/);
+  if (m) {
+    const argumentsList = splitParameters(m[1]);
+    const rawCondition = argumentsList.length
+      ? argumentsList[0].replace(
+          /\bsizeof\s*\(\s*([^()]+?)\s*\)/g,
+          (_, type) => `size of ${type.replace(/\*/g, " pointer ")}`,
+        )
+      : "condition";
+    const condition = cleanTokenSymbols(rawCondition);
+    const message =
+      argumentsList.length > 1
+        ? `, with message ${cleanTokenSymbols(argumentsList[1])}`
+        : "";
+    return {
+      text: `static assertion requiring ${condition} to be true at compile time${message}`,
+      transformed: true,
+      explanation: "Static Assertion",
+    };
+  }
+
+  m = text.match(
+    /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\((.*)\)\s*(?:->\s*[^:]+)?\s*:?\s*$/,
+  );
+  if (m)
+    return {
+      text: describeFunction(m[1], m[2]),
+      transformed: true,
+      explanation: "Function Definition",
+    };
+
+  m = text.match(
+    /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\((.*)\)\s*\{?\s*$/,
+  );
+  if (m)
+    return {
+      text: describeFunction(m[1], m[2]),
+      transformed: true,
+      explanation: "Function Definition",
+    };
+
+  m = text.match(
+    /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*\((.*)\)\s*(?:->\s*[^\{]+)?\s*\{?\s*$/,
+  );
+  if (m)
+    return {
+      text: describeFunction(m[1], m[2]),
+      transformed: true,
+      explanation: "Function Definition",
+    };
+
   if (/^\s*(?:int|void)?\s*main\s*\(\s*(?:void)?\s*\)\s*;?\s*$/.test(text)) {
     return {
       text: "main function with no arguments",
@@ -179,6 +291,16 @@ function verbalizeRuleBasedNative(rawText) {
       explanation: "Main Function Entrypoint",
     };
   }
+
+  m = text.match(
+    /^\s*(?:(?:public|private|protected|static|final|virtual|inline|constexpr|synchronized)\s+)*(?:[A-Za-z_$][\w$:<>,.?\[\]*&]*\s+)+([A-Za-z_$][\w$]*)\s*\((.*)\)\s*(?:const\s*)?[{;]?\s*$/,
+  );
+  if (m && !["if", "for", "while", "switch", "catch"].includes(m[1]))
+    return {
+      text: describeFunction(m[1], m[2]),
+      transformed: true,
+      explanation: "Function Definition",
+    };
   if (
     /^\s*int\s*main\s*\(\s*int\s+argc\s*,\s*char\s*\*\s*argv\s*\[\s*\]\s*\)\s*;?\s*$/.test(
       text,
@@ -252,7 +374,8 @@ function verbalizeRuleBasedNative(rawText) {
   }
 
   const cleaned = cleanTokenSymbols(text);
-  if (cleaned !== text) {
+  const punctuationOnly = cleaned === text.replace(/;\s*$/, "").trim();
+  if (cleaned !== text && !punctuationOnly) {
     return {
       text: cleaned,
       transformed: true,
@@ -344,9 +467,47 @@ async function parsePdfInBrowser(pdfDoc) {
   let segId = 0;
   const sentenceEndRegex = /[.?!…]$/;
 
+  // Headers and footers are a document-level property. Detect text repeated in
+  // the page margins before building the reading order so it never reaches TTS.
+  const marginalPages = new Map();
+  const pageSources = [];
+  const normalizeMarginal = (text) =>
+    text.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
   for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
     const page = await pdfDoc.getPage(pageIdx + 1);
     const viewport = page.getViewport({ scale: 1.0 });
+    const { height } = viewport;
+    const { items = [] } = await page.getTextContent({
+      normalizeWhitespace: false,
+    });
+    pageSources.push({ viewport, items });
+    const seen = new Set();
+    for (const item of items) {
+      const text = item.str?.trim();
+      if (!text) continue;
+      const itemHeight = Math.max(
+        8,
+        item.height || Math.abs(item.transform[3]) || 10,
+      );
+      const top = height - item.transform[5] - itemHeight;
+      const bottom = top + itemHeight;
+      if (top > height * 0.09 && bottom < height * 0.91) continue;
+      const key = normalizeMarginal(text);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      if (!marginalPages.has(key)) marginalPages.set(key, new Set());
+      marginalPages.get(key).add(pageIdx);
+    }
+  }
+  const repeatThreshold = Math.max(2, Math.ceil(totalPages * 0.5));
+  const repeatedMarginals = new Set(
+    [...marginalPages]
+      .filter(([, pages]) => pages.size >= repeatThreshold)
+      .map(([text]) => text),
+  );
+
+  for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
+    const { viewport, items: rawItems } = pageSources[pageIdx];
     const pw = viewport.width;
     const ph = viewport.height;
     pagesMeta.push({
@@ -355,10 +516,6 @@ async function parsePdfInBrowser(pdfDoc) {
       height: Math.round(ph * 10) / 10,
     });
 
-    const textContent = await page.getTextContent({
-      normalizeWhitespace: false,
-    });
-    const rawItems = textContent.items || [];
     if (rawItems.length === 0) continue;
 
     const lineBuckets = [];
@@ -381,8 +538,13 @@ async function parsePdfInBrowser(pdfDoc) {
       const leftX = tx;
       const rightX = tx + itemW;
 
-      if (topY < ph * 0.04 || bottomY > ph * 0.96) {
-        if (str.trim().length < 4 || /^\d+$/.test(str.trim())) continue;
+      if (topY < ph * 0.09 || bottomY > ph * 0.91) {
+        const marginText = str.trim();
+        if (
+          /^\s*(?:page\s*)?\d+(?:\s*(?:of|\/)\s*\d+)?\s*$/i.test(marginText) ||
+          repeatedMarginals.has(normalizeMarginal(marginText))
+        )
+          continue;
       }
 
       const fontName = (item.fontName || "").toLowerCase();
@@ -414,46 +576,61 @@ async function parsePdfInBrowser(pdfDoc) {
     const rawLines = [];
     for (const bucket of lineBuckets) {
       bucket.items.sort((a, b) => a.bbox[0] - b.bbox[0]);
-      const fullText = bucket.items
-        .map((it) => it.text)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!fullText) continue;
-
-      const minX = Math.min(...bucket.items.map((it) => it.bbox[0]));
-      const minY = Math.min(...bucket.items.map((it) => it.bbox[1]));
-      const maxX = Math.max(...bucket.items.map((it) => it.bbox[2]));
-      const maxY = Math.max(...bucket.items.map((it) => it.bbox[3]));
-      const isMonoLine = bucket.items.some((it) => it.isMono);
-      const codeFlag = isCodeLine(fullText, isMonoLine);
-
-      const words = [];
-      const charWidth = (maxX - minX) / Math.max(1, fullText.length);
-      const rawWords = fullText.split(" ");
-      let curPos = 0;
-      for (const w of rawWords) {
-        if (!w) continue;
-        const wStart = fullText.indexOf(w, curPos);
-        const wEnd = wStart + w.length;
-        curPos = wEnd;
-        words.push({
-          text: w,
-          bbox: [
-            minX + wStart * charWidth,
-            minY,
-            minX + wEnd * charWidth,
-            maxY,
-          ],
-        });
+      const groups = [];
+      for (const item of bucket.items) {
+        const previous = groups.at(-1)?.at(-1);
+        const height = item.bbox[3] - item.bbox[1];
+        if (
+          previous &&
+          item.bbox[0] - previous.bbox[2] > Math.max(24, height * 2.25)
+        )
+          groups.push([]);
+        if (!groups.length) groups.push([]);
+        groups.at(-1).push(item);
       }
 
-      rawLines.push({
-        bbox: [minX, minY, maxX, maxY],
-        words,
-        text: fullText,
-        is_code: codeFlag,
-      });
+      for (const items of groups) {
+        const fullText = items
+          .map((it) => it.text)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!fullText) continue;
+
+        const minX = Math.min(...items.map((it) => it.bbox[0]));
+        const minY = Math.min(...items.map((it) => it.bbox[1]));
+        const maxX = Math.max(...items.map((it) => it.bbox[2]));
+        const maxY = Math.max(...items.map((it) => it.bbox[3]));
+        const isMonoLine = items.some((it) => it.isMono);
+        const codeFlag = isCodeLine(fullText, isMonoLine);
+
+        const words = [];
+        const charWidth = (maxX - minX) / Math.max(1, fullText.length);
+        const rawWords = fullText.split(" ");
+        let curPos = 0;
+        for (const w of rawWords) {
+          if (!w) continue;
+          const wStart = fullText.indexOf(w, curPos);
+          const wEnd = wStart + w.length;
+          curPos = wEnd;
+          words.push({
+            text: w,
+            bbox: [
+              minX + wStart * charWidth,
+              minY,
+              minX + wEnd * charWidth,
+              maxY,
+            ],
+          });
+        }
+
+        rawLines.push({
+          bbox: [minX, minY, maxX, maxY],
+          words,
+          text: fullText,
+          is_code: codeFlag,
+        });
+      }
     }
 
     if (rawLines.length === 0) continue;
@@ -461,7 +638,8 @@ async function parsePdfInBrowser(pdfDoc) {
     const orderedLines = recursiveXYCut(rawLines);
 
     let currProseWords = [];
-    let prevLineY1 = null;
+    let prevLineY0 = null,
+      prevLineY1 = null;
 
     function flushProse() {
       if (currProseWords.length === 0) return;
@@ -502,6 +680,21 @@ async function parsePdfInBrowser(pdfDoc) {
           h: Math.max(0.1, Math.round((by1 - by0) * 100) / 100),
         });
       });
+      const wordBoxes = currProseWords.map((word) => ({
+        text: word.text,
+        x: Math.round((word.bbox[0] / pw) * 10000) / 100,
+        y: Math.round((word.bbox[1] / ph) * 10000) / 100,
+        w:
+          Math.max(
+            10,
+            Math.round(((word.bbox[2] - word.bbox[0]) / pw) * 10000),
+          ) / 100,
+        h:
+          Math.max(
+            10,
+            Math.round(((word.bbox[3] - word.bbox[1]) / ph) * 10000),
+          ) / 100,
+      }));
 
       const verb = verbalizeSegmentNative(cleanText, false);
       if (cleanText.length > 1) {
@@ -512,6 +705,7 @@ async function parsePdfInBrowser(pdfDoc) {
           original_text: sText,
           speech_text: verb.speech_text,
           boxes,
+          word_boxes: wordBoxes,
           is_code: false,
           transformed: verb.transformed,
           verbalizer: verb.verbalizer,
@@ -530,10 +724,12 @@ async function parsePdfInBrowser(pdfDoc) {
       if (prevLineY1 !== null) {
         const gap = lineBbox[1] - prevLineY1;
         const lineHeight = lineBbox[3] - lineBbox[1];
-        if (gap > Math.max(8.0, lineHeight * 1.3)) {
+        const movedToNextColumn = lineBbox[1] + lineHeight < prevLineY0;
+        if (gap > Math.max(8.0, lineHeight * 1.3) || movedToNextColumn) {
           flushProse();
         }
       }
+      prevLineY0 = lineBbox[1];
       prevLineY1 = lineBbox[3];
 
       if (isCode) {
@@ -557,6 +753,21 @@ async function parsePdfInBrowser(pdfDoc) {
               h: Math.max(0.1, Math.round((by1 - by0) * 100) / 100),
             },
           ],
+          word_boxes: line.words.map((word) => ({
+            text: word.text,
+            x: Math.round((word.bbox[0] / pw) * 10000) / 100,
+            y: Math.round((word.bbox[1] / ph) * 10000) / 100,
+            w:
+              Math.max(
+                10,
+                Math.round(((word.bbox[2] - word.bbox[0]) / pw) * 10000),
+              ) / 100,
+            h:
+              Math.max(
+                10,
+                Math.round(((word.bbox[3] - word.bbox[1]) / ph) * 10000),
+              ) / 100,
+          })),
           is_code: true,
           transformed: verb.transformed,
           verbalizer: verb.verbalizer,

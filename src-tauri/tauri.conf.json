@@ -32,7 +32,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns"
     ],
-    "resources": [],
+    "resources": {
+      "binaries/9-gyo-phi-engine.zip": "9-gyo-phi-engine.zip"
+    },
     "shortDescription": "A private listening library for PDFs, notes, and ideas",
     "category": "Productivity"
   }

@@ -58,6 +58,55 @@ test("playback reaches every passage exactly once", async () => {
   assert.equal(player.buffers.length, 3);
   assert.equal(states.at(-1).state, "finished");
 });
+test("neural playback prepares the next passage while current audio plays", async () => {
+  const player = new Player(() => {}),
+    synthesized = [];
+  let releaseFirst;
+  player.synthesize = async (text) => {
+    synthesized.push(text);
+    return { text, duration: 0.1 };
+  };
+  player.playBuffer = (buffer) =>
+    buffer.text === segments[0].original_text
+      ? new Promise((resolve) => {
+          releaseFirst = resolve;
+        })
+      : Promise.resolve();
+  const playback = player.play(segments, 0, {
+    ...options,
+    engine: "mlx",
+  });
+  while (!releaseFirst) await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(synthesized.slice(0, 2), [
+    segments[0].original_text,
+    segments[1].original_text,
+  ]);
+  releaseFirst();
+  await playback;
+});
+test("playback awaits an asynchronous code verbalizer", async () => {
+  const player = new Player(() => {}),
+    played = [];
+  player.synthesize = async (text) => ({ text, duration: 0.1 });
+  player.playBuffer = async (buffer) => played.push(buffer.text);
+  await player.play([segments[0]], 0, {
+    ...options,
+    transform: async () => "human-readable code",
+  });
+  assert.deepEqual(played, ["human-readable code"]);
+});
+test("word-level starts trim only the first selected passage", async () => {
+  const player = new Player(() => {}),
+    played = [];
+  player.synthesize = async (text) => ({ text, duration: 0.1 });
+  player.playBuffer = async (buffer) => played.push(buffer.text);
+  await player.play(segments.slice(0, 2), 0, {
+    ...options,
+    firstText: "sentence.",
+  });
+  assert.deepEqual(played, ["sentence.", "A second sentence."]);
+});
 test("synthesis failures produce a recoverable error and stop the loop", async () => {
   const player = new Player(() => {});
   let attempts = 0;

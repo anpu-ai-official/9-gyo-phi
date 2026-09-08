@@ -84,3 +84,13 @@ class TestPipelineCompleteness:
         assert len(combined.output.audio) == 48000
         assert combined.tokens[1].start_ts == 1.1
         assert combined.tokens[1].end_ts == 1.5
+
+    def test_missing_model_timestamps_do_not_break_multi_result_audio(self):
+        from types import SimpleNamespace
+        from server import merge_pipeline_results
+        def result(text):
+            return SimpleNamespace(output=SimpleNamespace(audio=np.ones(24000)), tokens=[SimpleNamespace(text=text, whitespace=True, start_ts=None, end_ts=None)])
+        combined = merge_pipeline_results([result('First'), result('Second')], 24000)
+        assert len(combined.output.audio) == 48000
+        assert combined.tokens[0].start_ts is None
+        assert combined.tokens[1].end_ts is None

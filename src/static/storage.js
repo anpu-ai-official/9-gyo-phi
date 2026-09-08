@@ -69,8 +69,9 @@ async function transaction(store, mode, action) {
 }
 export const listDocuments = () =>
   transaction("documents", "readonly", (s) => s.getAll());
-export const getPdfBytes = (id) =>
+export const getDocumentBytes = (id) =>
   transaction("contents", "readonly", (s) => s.get(id));
+export const getPdfBytes = getDocumentBytes;
 export const getSetting = (key) =>
   transaction("settings", "readonly", (s) => s.get(key));
 export const saveSetting = (key, value) =>
@@ -80,9 +81,10 @@ export async function importDocuments(docs) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(["documents", "contents"], "readwrite");
     for (const doc of docs) {
-      const { pdfBytes, ...metadata } = doc;
+      const { pdfBytes, sourceBytes, ...metadata } = doc;
+      const bytes = sourceBytes || pdfBytes;
       tx.objectStore("documents").put(metadata);
-      if (pdfBytes) tx.objectStore("contents").put(pdfBytes, doc.id);
+      if (bytes) tx.objectStore("contents").put(bytes, doc.id);
     }
     tx.oncomplete = resolve;
     tx.onabort = tx.onerror = () =>

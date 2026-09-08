@@ -44,6 +44,8 @@ RE_PY_CLASS = re.compile(r'^\s*class\s+([a-zA-Z0-9_]+)(?:\s*\((.*?)\))?\s*:\s*$'
 RE_PY_MAIN_CHECK = re.compile(r'^\s*if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:\s*$')
 RE_PY_IMPORT = re.compile(r'^\s*import\s+([a-zA-Z0-9_]+)(?:\s+as\s+([a-zA-Z0-9_]+))?\s*$')
 RE_PY_FROM_IMPORT = re.compile(r'^\s*from\s+([a-zA-Z0-9_\.]+)\s+import\s+(.*)\s*$')
+RE_JS_FUNCTION = re.compile(r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([a-zA-Z_$][\w$]*)\s*\((.*?)\)\s*\{?\s*$')
+RE_RUST_FUNCTION = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-zA-Z_]\w*)\s*\((.*?)\)\s*(?:->\s*[^\{]+)?\s*\{?\s*$')
 
 # Known C/C++ standard library headers to natural names
 STANDARD_HEADERS = {
@@ -114,6 +116,61 @@ def clean_token_symbols(text: str) -> str:
     t = re.sub(r';$', '', t)
     return re.sub(r'\s+', ' ', t).strip()
 
+
+def describe_function(name: str, parameters: str) -> str:
+    """Turn a common function signature into concise, human speech."""
+    raw_parameters = [part.strip() for part in parameters.split(',') if part.strip() and part.strip() != 'void']
+    names = []
+    for parameter in raw_parameters:
+        value = re.sub(r'\s*=.*$', '', parameter).strip().lstrip('*')
+        if re.match(r'^[A-Za-z_$][\w$]*\s*:', value):
+            value = value.split(':', 1)[0]
+        identifiers = re.findall(r'[A-Za-z_$][\w$]*', value)
+        names.append(identifiers[-1] if identifiers else clean_token_symbols(value))
+    if not names:
+        return f"function definition for a function named {name} with no arguments"
+    count_words = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten')
+    count = count_words[len(names)] if len(names) < len(count_words) else str(len(names))
+    name_list = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    suffix = '' if len(names) == 1 else 's'
+    return f"function definition for a function named {name} with {count} argument{suffix} {name_list}"
+
+
+def split_arguments(source: str) -> list[str]:
+    """Split comma-separated syntax without breaking nested expressions."""
+    result: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for character in source:
+        if escaped:
+            current.append(character)
+            escaped = False
+            continue
+        if character == "\\" and quote:
+            current.append(character)
+            escaped = True
+            continue
+        if character in {'"', "'"}:
+            if quote == character:
+                quote = ""
+            elif not quote:
+                quote = character
+        elif not quote:
+            if character in "([{<":
+                depth += 1
+            elif character in ")]}>":
+                depth = max(0, depth - 1)
+            elif character == "," and depth == 0:
+                result.append("".join(current).strip())
+                current = []
+                continue
+        current.append(character)
+    if current:
+        result.append("".join(current).strip())
+    return [item for item in result if item]
+
 def verbalize_rule_based(raw_text: str) -> Tuple[str, bool, str]:
     """
     Fast, deterministic rule-based verbalization for code lines.
@@ -168,6 +225,28 @@ def verbalize_rule_based(raw_text: str) -> Tuple[str, bool, str]:
     m = RE_PRAGMA.match(text)
     if m:
         return f"hash pragma {m.group(1)}", True, "Compiler Directive"
+
+    m = re.match(r'^\s*static_assert\s*\((.*)\)\s*;?\s*$', text)
+    if m:
+        arguments = split_arguments(m.group(1))
+        raw_condition = arguments[0] if arguments else "condition"
+        raw_condition = re.sub(
+            r'\bsizeof\s*\(\s*([^()]+?)\s*\)',
+            lambda match: "size of "
+            + re.sub(r'\*', ' pointer ', match.group(1)),
+            raw_condition,
+        )
+        condition = clean_token_symbols(raw_condition)
+        message = (
+            f", with message {clean_token_symbols(arguments[1])}"
+            if len(arguments) > 1
+            else ""
+        )
+        return (
+            f"static assertion requiring {condition} to be true at compile time{message}",
+            True,
+            "Static Assertion",
+        )
 
     # Main function
     if RE_MAIN.match(text):
@@ -255,10 +334,15 @@ def verbalize_rule_based(raw_text: str) -> Tuple[str, bool, str]:
     # Python Specifics
     m = RE_PY_DEF.match(text)
     if m:
-        fn_name = m.group(1)
-        params = m.group(2).strip()
-        param_desc = f"taking {clean_token_symbols(params)}" if params else "with no parameters"
-        return f"define function {fn_name} {param_desc}", True, "Function Definition"
+        return describe_function(m.group(1), m.group(2)), True, "Function Definition"
+
+    m = RE_JS_FUNCTION.match(text)
+    if m:
+        return describe_function(m.group(1), m.group(2)), True, "Function Definition"
+
+    m = RE_RUST_FUNCTION.match(text)
+    if m:
+        return describe_function(m.group(1), m.group(2)), True, "Function Definition"
 
     m = RE_PY_CLASS.match(text)
     if m:
@@ -284,7 +368,8 @@ def verbalize_rule_based(raw_text: str) -> Tuple[str, bool, str]:
 
     # Clean punctuation symbols in general code statements
     cleaned = clean_token_symbols(text)
-    if cleaned != text:
+    punctuation_only = cleaned == text.rstrip(';').strip()
+    if cleaned != text and not punctuation_only:
         return cleaned, True, "Syntax Normalization"
 
     return text, False, ""
@@ -325,7 +410,7 @@ class LLMVerbalizerEngine:
                 print(f"[LLM Verbalizer] Failed to load {self.model_id}:", err)
                 return False
 
-    def verbalize(self, text: str, max_tokens: int = 45) -> Optional[str]:
+    def verbalize(self, text: str, max_tokens: int = 64) -> Optional[str]:
         cleaned_in = text.strip()
         if not cleaned_in:
             return None
@@ -338,29 +423,39 @@ class LLMVerbalizerEngine:
         import mlx_lm
         prompt = (
             f"You are a technical audio lecture verbalizer for computer science textbooks. "
-            f"Convert this code into a natural, spoken lecture explanation for text-to-speech. "
-            f"Follow convention: '#include <stdio.h>' becomes 'hash includes standard header'. "
-            f"Output ONLY the spoken words. No markdown, no quotes, no extra conversational preamble.\n\n"
+            f"Convert the code below into exactly one grammatical sentence for text-to-speech. "
+            f"Use at most 24 words. Describe only visible syntax and intent that is certain. "
+            f"Do not add examples, caveats, alternatives, markdown, quotes, or a preamble. "
+            f"End with a period.\n"
             f"Code: {cleaned_in}\n"
             f"Spoken:"
         )
 
         with self._lock:
             try:
-                raw_out = mlx_lm.generate(
-                    self._model,
-                    self._tokenizer,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    verbose=False
-                )
-                spoken = raw_out.strip().split('\n')[0].strip()
-                # Strip any quotes or redundant "Spoken:" prefixes
-                spoken = re.sub(r'^(?:Spoken:|"|\')\s*', '', spoken)
-                spoken = re.sub(r'["\']\s*$', '', spoken).strip()
-                if spoken and len(spoken) > 3:
-                    self._cache[cleaned_in] = spoken
-                    return spoken
+                for token_budget in (max_tokens, min(192, max_tokens * 2)):
+                    raw_out = mlx_lm.generate(
+                        self._model,
+                        self._tokenizer,
+                        prompt=prompt,
+                        max_tokens=token_budget,
+                        verbose=False
+                    )
+                    spoken = " ".join(
+                        line.strip() for line in raw_out.splitlines() if line.strip()
+                    )
+                    spoken = re.split(r'<\|[^>]+\|>', spoken, maxsplit=1)[0].strip()
+                    # Strip any quotes or redundant "Spoken:" prefixes.
+                    spoken = re.sub(r'^(?:Spoken:|"|\')\s*', '', spoken)
+                    spoken = re.sub(r'["\']\s*$', '', spoken).strip()
+                    # Qwen may continue generating after a valid first
+                    # sentence. Keep only that complete sentence; if it hits
+                    # the token ceiling before one, retry with a larger budget.
+                    sentence = re.match(r'^(.+?[.!?…])(?:\s|$)', spoken)
+                    if sentence and len(sentence.group(1)) > 3:
+                        spoken = sentence.group(1).strip()
+                        self._cache[cleaned_in] = spoken
+                        return spoken
             except Exception as e:
                 print("[LLM Verbalizer] Inference error:", e)
         return None

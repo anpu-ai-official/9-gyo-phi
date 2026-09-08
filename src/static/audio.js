@@ -62,19 +62,38 @@ export class Player {
     this.buffers = [];
     this.recordedSeconds = 0;
     this.controller = new AbortController();
+    let prepared = null;
+    const settle = (promise) =>
+      promise.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
     for (
       let index = start;
       index < segments.length && this.generation === generation;
       index++
     ) {
       this.index = index;
-      this.update("loading", "Preparing voice…");
+      if (!prepared) {
+        this.update("loading", "Preparing voice…");
+        const segment =
+          index === start && options.firstText
+            ? { ...segments[index], original_text: options.firstText }
+            : segments[index];
+        prepared = settle(this.prepare(segment, options, generation, false));
+      }
       try {
-        const text = options.transform
-          ? options.transform(segments[index])
-          : segments[index].original_text;
-        const buffer = await this.synthesize(text, options, generation);
+        const result = await prepared;
+        if (result.error) throw result.error;
+        const { text, buffer } = result.value;
         if (this.generation !== generation) return;
+        const nextIndex = index + 1;
+        prepared =
+          nextIndex < segments.length && options.engine !== "system"
+            ? settle(
+                this.prepare(segments[nextIndex], options, generation, true),
+              )
+            : null;
         if (buffer) {
           this.recordedSeconds += buffer.duration;
           if (this.recordedSeconds <= 1800) this.buffers.push(buffer);
@@ -100,6 +119,18 @@ export class Player {
       }
     }
     if (generation === this.generation) this.update("finished");
+  }
+  async prepare(segment, options, generation, prefetch) {
+    const text = options.transform
+      ? await options.transform(segment, { signal: this.controller.signal })
+      : segment.original_text;
+    if (this.generation !== generation) return { text, buffer: null };
+    const buffer = await this.synthesize(
+      text,
+      { ...options, prefetch },
+      generation,
+    );
+    return { text, buffer };
   }
   async synthesize(text, options, generation) {
     if (options.engine === "mlx") {
@@ -191,7 +222,7 @@ export class Player {
             );
             buffer.copyToChannel(data.audio, 0);
             finish(null, buffer);
-          } else
+          } else if (!options.prefetch)
             this.update(
               "loading",
               data.progress
