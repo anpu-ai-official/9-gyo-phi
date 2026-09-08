@@ -22,8 +22,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       NATIVE_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -32,7 +32,7 @@ jobs:
       - run: npm run check
       - run: npm run build:native-engine
       - run: npx tauri build --target aarch64-apple-darwin
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: 9-gyo-phi-macos-arm64
           path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
