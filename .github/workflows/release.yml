@@ -17,7 +17,7 @@ jobs:
   macos-arm64:
     name: Apple Silicon bundle
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       NATIVE_TARGET_ARCH: arm64
@@ -30,7 +30,15 @@ jobs:
       - run: rustup target add aarch64-apple-darwin
       - run: npm ci
       - run: npm run check
-      - run: npm run build:native-engine
+      - name: Restore native engine
+        id: native-engine-cache
+        uses: actions/cache@v6
+        with:
+          path: src-tauri/binaries/llama-server-aarch64-apple-darwin
+          key: llama-server-${{ runner.os }}-${{ runner.arch }}-9113cc1880763bf590774490f51a661bf22403a4-ninja-v1
+      - name: Build native engine
+        if: steps.native-engine-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-engine
       - run: npx tauri build --target aarch64-apple-darwin
       - uses: actions/upload-artifact@v7
         with:

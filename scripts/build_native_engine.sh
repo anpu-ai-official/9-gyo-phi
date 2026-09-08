@@ -4,10 +4,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/work/llama.cpp"
-BUILD_DIR="$ROOT_DIR/work/llama-build"
 OUTPUT_DIR="$ROOT_DIR/src-tauri/binaries"
 LLAMA_COMMIT="9113cc1880763bf590774490f51a661bf22403a4"
 TARGET_ARCH="${NATIVE_TARGET_ARCH:-$(uname -m)}"
+
+if command -v ninja >/dev/null 2>&1; then
+  BUILD_DIR="$ROOT_DIR/work/llama-build-ninja"
+  CMAKE_GENERATOR=(-G Ninja)
+else
+  BUILD_DIR="$ROOT_DIR/work/llama-build"
+  CMAKE_GENERATOR=()
+fi
 
 if [[ "$(uname -s)" != "Darwin" || "$TARGET_ARCH" != "arm64" ]]; then
   echo "Skipping native model engine: this build target is Apple Silicon macOS." >&2
@@ -20,7 +27,7 @@ fi
 
 git -C "$SOURCE_DIR" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$SOURCE_DIR" checkout --detach "$LLAMA_COMMIT"
-cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
+cmake "${CMAKE_GENERATOR[@]}" -S "$SOURCE_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_ARCHITECTURES="$TARGET_ARCH" \
   -DGGML_METAL=ON \
