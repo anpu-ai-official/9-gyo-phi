@@ -4,14 +4,14 @@
 
 ## Desktop matrix
 
-| Target          |    Build     | Native LLM |    Kokoro    |     M4B      |    Signing    | Status                                                      |
-| --------------- | :----------: | :--------: | :----------: | :----------: | :-----------: | ----------------------------------------------------------- |
-| macOS 13+ ARM64 |      ✓       |   Metal    |      ✓       |      ✓       |    Pending    | Verified development target; public installer remains draft |
-| macOS 13+ x64   | CI candidate |    CPU     | CI candidate | CI candidate |    Pending    | Release candidate                                           |
-| Windows x64     | CI candidate |    CPU     | CI candidate | CI candidate |    Pending    | Release candidate                                           |
-| Linux x64       | CI candidate |    CPU     | CI candidate | CI candidate | Checksum only | Release candidate                                           |
-| Windows ARM64   |   Planned    |     —      |      —       |      —       |       —       | Unsupported                                                 |
-| Linux ARM64     |   Planned    |     —      |      —       |      —       |       —       | Unsupported                                                 |
+| Target          |  Build  | Native LLM |    Kokoro    |     M4B      |    Signing    | Status                                                      |
+| --------------- | :-----: | :--------: | :----------: | :----------: | :-----------: | ----------------------------------------------------------- |
+| macOS 13+ ARM64 |    ✓    |   Metal    |      ✓       |      ✓       |    Pending    | Verified development target; public installer remains draft |
+| macOS 13+ x64   |    ✓    |    CPU     | CI candidate | CI candidate |    Pending    | CI-built release candidate                                  |
+| Windows x64     |    ✓    |    CPU     | CI candidate |      ✓       |    Pending    | CI-built release candidate                                  |
+| Linux x64       |    ✓    |    CPU     | CI candidate |      ✓       | Checksum only | CI-built release candidate                                  |
+| Windows ARM64   | Planned |     —      |      —       |      —       |       —       | Unsupported                                                 |
+| Linux ARM64     | Planned |     —      |      —       |      —       |       —       | Unsupported                                                 |
 
 Kokoro is the consistent default voice and uses a portable ONNX Runtime CPU baseline on every desktop target. macOS and Windows expose installed operating-system voices when discovery succeeds. Linux uses Kokoro because there is no dependable system-wide voice provider across distributions.
 
