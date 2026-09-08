@@ -847,6 +847,56 @@ const KOKORO_VOICES: [(&str, &str); 5] = [
     ),
 ];
 
+fn spoken_single_letter(letter: char) -> Option<&'static str> {
+    match letter {
+        'B' => Some("bee"),
+        'C' => Some("see"),
+        'D' => Some("dee"),
+        'E' => Some("ee"),
+        'F' => Some("eff"),
+        'G' => Some("gee"),
+        'H' => Some("aitch"),
+        'J' => Some("jay"),
+        'K' => Some("kay"),
+        'L' => Some("ell"),
+        'M' => Some("em"),
+        'N' => Some("en"),
+        'O' => Some("oh"),
+        'P' => Some("pee"),
+        'Q' => Some("cue"),
+        'R' => Some("are"),
+        'S' => Some("ess"),
+        'T' => Some("tee"),
+        'U' => Some("you"),
+        'V' => Some("vee"),
+        'W' => Some("double u"),
+        'X' => Some("ex"),
+        'Y' => Some("why"),
+        'Z' => Some("zee"),
+        _ => None,
+    }
+}
+
+fn normalize_kokoro_input(source: &str) -> String {
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(source.len());
+    for (index, character) in chars.iter().copied().enumerate() {
+        let previous_is_word =
+            index > 0 && (chars[index - 1].is_alphanumeric() || chars[index - 1] == '_');
+        let next = chars.get(index + 1).copied();
+        let next_is_word = next.is_some_and(|value| value.is_alphanumeric() || value == '_');
+        let is_language_suffix = matches!(next, Some('+' | '#'));
+        if !previous_is_word && !next_is_word && !is_language_suffix {
+            if let Some(spoken) = spoken_single_letter(character) {
+                output.push_str(spoken);
+                continue;
+            }
+        }
+        output.push(character);
+    }
+    output
+}
+
 fn kokoro_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
     let directory = app
         .path()
@@ -938,6 +988,38 @@ async fn ensure_kokoro_assets(app: &tauri::AppHandle) -> Result<(PathBuf, PathBu
 }
 
 #[tauri::command]
+async fn warm_speech_engines(
+    app: tauri::AppHandle,
+    native_state: tauri::State<'_, NativeEngineState>,
+    kokoro_state: tauri::State<'_, KokoroState>,
+) -> Result<bool, String> {
+    if !is_server_alive(ENGINE_PORT) {
+        if let Some(child) = spawn_native_llm(&app) {
+            *native_state.child.lock().unwrap() = Some(child);
+        }
+    }
+
+    let (model, voices) = kokoro_paths(&app)?;
+    let installed = model.is_file()
+        && KOKORO_VOICES
+            .iter()
+            .all(|(name, _)| voices.join(format!("{name}.bin")).is_file());
+    if !installed {
+        return Ok(false);
+    }
+
+    let mut engine = kokoro_state.engine.lock().await;
+    if engine.is_none() {
+        *engine = Some(
+            KokoroTts::new(model, voices)
+                .await
+                .map_err(|error| format!("Kokoro could not warm up: {error}"))?,
+        );
+    }
+    Ok(true)
+}
+
+#[tauri::command]
 async fn synthesize_kokoro_speech(
     app: tauri::AppHandle,
     state: tauri::State<'_, KokoroState>,
@@ -962,11 +1044,12 @@ async fn synthesize_kokoro_speech(
                 .map_err(|error| format!("Kokoro could not load: {error}"))?,
         );
     }
+    let normalized = normalize_kokoro_input(source);
     let selected = Voice::new(voice).with_speed(speed.unwrap_or(1.0).clamp(0.5, 2.0));
     let (audio, _) = engine
         .as_ref()
         .expect("Kokoro is initialized")
-        .synth(source, selected)
+        .synth(normalized, selected)
         .await
         .map_err(|error| format!("Kokoro could not synthesize this passage: {error}"))?;
     let mut pcm = Vec::with_capacity(audio.len() * 2);
@@ -1172,7 +1255,8 @@ pub fn run() {
             native_llm_status,
             download_native_llm,
             cancel_native_llm_download,
-            prepare_speech_native
+            prepare_speech_native,
+            warm_speech_engines
         ])
         .setup(|app| {
             let child = spawn_native_llm(app.handle());
@@ -1239,6 +1323,17 @@ mod tests {
         assert!(serialized.contains("read it verbatim"));
     }
 
+    #[test]
+    fn kokoro_g2p_keeps_the_c_language_name() {
+        let normalized = normalize_kokoro_input("In C, a pointer stores an address.");
+        assert_eq!(normalized, "In see, a pointer stores an address.");
+        let phonemes = kokoro_en::g2p(&normalized, false).unwrap();
+        assert!(
+            phonemes.contains("sˈi"),
+            "expected the letter C to be pronounced as see, got {phonemes:?}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires the real Kokoro ONNX model and voice files"]
     async fn real_kokoro_model_generates_non_silent_audio() {
@@ -1247,13 +1342,8 @@ mod tests {
         let voices = std::env::var("KOKORO_VOICES_PATH")
             .expect("KOKORO_VOICES_PATH must point to the voice directory");
         let engine = KokoroTts::new(model, voices).await.unwrap();
-        let (audio, _) = engine
-            .synth(
-                "Native Kokoro produces real local speech.",
-                Voice::new("af_heart"),
-            )
-            .await
-            .unwrap();
+        let source = normalize_kokoro_input("In C, a pointer stores an address.");
+        let (audio, _) = engine.synth(source, Voice::new("af_heart")).await.unwrap();
         assert!(audio.len() > 24_000);
         assert!(audio.iter().any(|sample| sample.abs() > 0.01));
     }

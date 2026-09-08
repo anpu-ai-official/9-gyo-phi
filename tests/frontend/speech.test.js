@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { prepareSpeechText } from "../../src/static/speech.js";
+import {
+  normalizeSpeechForTts,
+  prepareSpeechText,
+} from "../../src/static/speech.js";
 
 const fixture = JSON.parse(
   await readFile(
@@ -27,7 +30,7 @@ for (const caseStudy of fixture.cases) {
         },
       },
     );
-    assert.equal(speech, caseStudy.expected);
+    assert.equal(speech, normalizeSpeechForTts(caseStudy.expected));
     assert.deepEqual(payload, {
       text: caseStudy.source,
       is_code: caseStudy.is_code,
@@ -45,7 +48,7 @@ test("speech preparation deterministically falls back when disabled or unavailab
       fallback: "A P I version two",
       request: () => assert.fail("disabled preparation must not call the LLM"),
     }),
-    "A P I version two",
+    "ay pee eye version two",
   );
   assert.equal(
     await prepareSpeechText(segment, {
@@ -54,6 +57,46 @@ test("speech preparation deterministically falls back when disabled or unavailab
         throw new Error("model unavailable");
       },
     }),
-    "A P I version two",
+    "ay pee eye version two",
   );
+});
+
+test("standalone language letters remain audible after speech preparation", async () => {
+  assert.equal(
+    normalizeSpeechForTts("In C, a pointer stores an address."),
+    "In see, a pointer stores an address.",
+  );
+  assert.equal(
+    await prepareSpeechText(
+      { original_text: "In C, a pointer stores an address." },
+      {
+        fallback: "In C, a pointer stores an address.",
+        request: async () => ({
+          speech_text: "In C, a pointer stores an address.",
+        }),
+      },
+    ),
+    "In see, a pointer stores an address.",
+  );
+});
+
+test("concurrent preparation reuses the same bounded cache entry", async () => {
+  const cache = new Map();
+  let requests = 0;
+  const request = async () => {
+    requests++;
+    await Promise.resolve();
+    return { speech_text: "A P I version two" };
+  };
+  const segment = { original_text: "API v2" };
+  const options = { cache, request };
+  const results = await Promise.all([
+    prepareSpeechText(segment, options),
+    prepareSpeechText(segment, options),
+  ]);
+  assert.deepEqual(results, [
+    "ay pee eye version two",
+    "ay pee eye version two",
+  ]);
+  assert.equal(requests, 1);
 });

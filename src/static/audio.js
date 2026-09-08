@@ -1,4 +1,18 @@
-import { wavBytes } from "./core.js";
+import { splitText, wavBytes } from "./core.js";
+
+export function* playbackUnits(segments, start, firstText = "", limit = 180) {
+  for (let index = start; index < segments.length; index++) {
+    const text =
+      index === start && firstText ? firstText : segments[index].original_text;
+    for (const unit of splitText(text, limit)) {
+      yield {
+        index,
+        segment: { ...segments[index], original_text: unit },
+      };
+    }
+  }
+}
+
 export class Player {
   constructor(onChange) {
     this.onChange = onChange;
@@ -67,32 +81,25 @@ export class Player {
         (value) => ({ value }),
         (error) => ({ error }),
       );
-    for (
-      let index = start;
-      index < segments.length && this.generation === generation;
-      index++
-    ) {
-      this.index = index;
+    const units = playbackUnits(segments, start, options.firstText);
+    let current = units.next();
+    while (!current.done && this.generation === generation) {
+      this.index = current.value.index;
       if (!prepared) {
         this.update("loading", "Preparing voice…");
-        const segment =
-          index === start && options.firstText
-            ? { ...segments[index], original_text: options.firstText }
-            : segments[index];
-        prepared = settle(this.prepare(segment, options, generation, false));
+        prepared = settle(
+          this.prepare(current.value.segment, options, generation, false),
+        );
       }
       try {
         const result = await prepared;
         if (result.error) throw result.error;
         const { text, buffer } = result.value;
         if (this.generation !== generation) return;
-        const nextIndex = index + 1;
-        prepared =
-          nextIndex < segments.length && options.engine !== "system"
-            ? settle(
-                this.prepare(segments[nextIndex], options, generation, true),
-              )
-            : null;
+        const next = units.next();
+        prepared = next.done
+          ? null
+          : settle(this.prepare(next.value.segment, options, generation, true));
         if (buffer) {
           this.recordedSeconds += buffer.duration;
           if (this.recordedSeconds <= 1800) this.buffers.push(buffer);
@@ -106,6 +113,7 @@ export class Player {
           }
           await this.playBuffer(buffer, generation);
         } else await this.speak(text, options, generation);
+        current = next;
       } catch (error) {
         if (generation !== this.generation) return;
         this.stop();
@@ -134,7 +142,7 @@ export class Player {
   async synthesize(text, options, generation) {
     if (options.engine === "neural") {
       if (window.__TAURI__?.core) {
-        this.update("loading", "Loading native Kokoro…");
+        if (!options.prefetch) this.update("loading", "Loading native Kokoro…");
         const result = await window.__TAURI__.core.invoke(
           "synthesize_kokoro_speech",
           {

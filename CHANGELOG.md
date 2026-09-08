@@ -9,6 +9,18 @@ All notable changes are documented here. The project follows [Semantic Versionin
 - Signed and notarized public macOS releases.
 - Broader long-document and accessibility testing.
 
+## [0.3.1] - 2026-09-09
+
+### Fixed
+
+- Preserve standalone language and variable letters at the final TTS boundary, including pronouncing “In C” as “In see” instead of dropping the language name.
+- Start narration with sentence-sized units, prepare the following unit during playback, and keep background preparation from replacing the playing state.
+
+### Changed
+
+- Warm installed local speech engines when a document opens.
+- Cache in-flight and completed LLM speech preparation for the current session.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added
@@ -42,7 +54,8 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 - Initial local document reader and speech prototype.
 
-[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anpu-ai-official/9-gyo-phi/releases/tag/v0.1.0

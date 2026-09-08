@@ -1,6 +1,6 @@
 [package]
 name = "nine-gyo-phi"
-version = "0.3.0"
+version = "0.3.1"
 description = "A private, local-first document reader and audiobook studio"
 authors = ["9-gyo-phi contributors"]
 license = "MIT"

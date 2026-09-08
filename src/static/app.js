@@ -24,7 +24,7 @@ import {
   saveAudiobook,
 } from "./storage.js";
 import { parsePdfInBrowser, verbalizeRuleBasedNative } from "./parser.js";
-import { Player } from "./audio.js";
+import { Player, playbackUnits } from "./audio.js";
 import { prepareSpeechText } from "./speech.js";
 
 const $ = (id) => document.getElementById(id);
@@ -147,6 +147,7 @@ let draft = { title: "", text: "", id: null },
 let audiobookController = null,
   audiobookPositionTimer;
 const history = new History();
+const speechPreparationCache = new Map();
 let settings = {
   engine: "neural",
   voice: "af_heart",
@@ -780,6 +781,7 @@ async function openDocument(id) {
   $("textContent").replaceChildren();
   renderPassages();
   updatePlayer({ state: "idle", index: doc.position });
+  primeReaderAudio(doc.position).catch(() => {});
   if (doc.kind === "pdf") {
     $("playerDetail").textContent = "Opening PDF…";
     try {
@@ -1519,6 +1521,7 @@ function playbackOptions() {
         enabled: settings.llm,
         fallback: local,
         signal,
+        cache: speechPreparationCache,
         request: window.__TAURI__?.core
           ? (payload) =>
               window.__TAURI__.core.invoke("prepare_speech_native", {
@@ -1530,6 +1533,18 @@ function playbackOptions() {
     },
   };
 }
+
+async function primeReaderAudio(index) {
+  if (!activeSegments.length || !settings.smart) return;
+  window.__TAURI__?.core?.invoke("warm_speech_engines").catch(() => {});
+  const options = playbackOptions();
+  let prepared = 0;
+  for (const unit of playbackUnits(activeSegments, index)) {
+    await options.transform(unit.segment).catch(() => {});
+    if (++prepared >= 3) break;
+  }
+}
+
 async function playToggle() {
   if (!activeSegments.length) return;
   if (player.state === "loading") player.stop();

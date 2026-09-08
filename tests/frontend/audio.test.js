@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Player } from "../../src/static/audio.js";
+import { Player, playbackUnits } from "../../src/static/audio.js";
 
 globalThis.window = {};
 globalThis.speechSynthesis = { cancel() {}, pause() {}, resume() {} };
@@ -85,6 +85,21 @@ test("neural playback prepares the next passage while current audio plays", asyn
   releaseFirst();
   await playback;
 });
+test("long passages become sentence-sized low-latency playback units", () => {
+  const source = {
+    original_text:
+      "In C, a pointer stores an address. This second sentence explains where the object lives in memory.",
+  };
+  const units = [...playbackUnits([source], 0)];
+  assert.deepEqual(
+    units.map((unit) => unit.segment.original_text),
+    [
+      "In C, a pointer stores an address.",
+      "This second sentence explains where the object lives in memory.",
+    ],
+  );
+  assert.ok(units.every((unit) => unit.index === 0));
+});
 test("offline neural synthesis returns PCM without a live audio context", async () => {
   const OriginalWorker = globalThis.Worker;
   const OriginalAudioContext = globalThis.AudioContext;
@@ -116,6 +131,34 @@ test("offline neural synthesis returns PCM without a live audio context", async 
   } finally {
     globalThis.Worker = OriginalWorker;
     globalThis.AudioContext = OriginalAudioContext;
+  }
+});
+test("native prefetch does not replace playing state with a loading state", async () => {
+  const states = [];
+  window.__TAURI__ = {
+    core: {
+      invoke: async () => ({
+        pcm_b64: btoa(String.fromCharCode(0, 0, 255, 127)),
+        sample_rate: 24000,
+      }),
+    },
+  };
+  try {
+    const player = new Player(({ state }) => states.push(state));
+    await player.synthesize(
+      "Prepared next sentence.",
+      {
+        engine: "neural",
+        voice: "af_heart",
+        speed: 1,
+        offline: true,
+        prefetch: true,
+      },
+      0,
+    );
+    assert.ok(!states.includes("loading"));
+  } finally {
+    delete window.__TAURI__;
   }
 });
 test("playback awaits an asynchronous code verbalizer", async () => {
