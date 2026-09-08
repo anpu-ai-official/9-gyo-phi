@@ -51,6 +51,8 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
           patchelf libssl-dev
+      - name: Create non-executed sidecar fixture
+        run: node scripts/create_sidecar_fixture.mjs
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
