@@ -2,7 +2,8 @@
   "bundle": {
     "targets": ["appimage", "deb"],
     "resources": {
-      "binaries/llama-server-x86_64-unknown-linux-gnu": "llama-server"
+      "binaries/llama-server-x86_64-unknown-linux-gnu": "llama-server",
+      "binaries/llama-server-x86_64-unknown-linux-gnu-vulkan": "llama-server-vulkan"
     }
   }
 }

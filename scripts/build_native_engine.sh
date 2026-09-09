@@ -9,10 +9,8 @@ LLAMA_COMMIT="9113cc1880763bf590774490f51a661bf22403a4"
 TARGET_ARCH="${NATIVE_TARGET_ARCH:-$(uname -m)}"
 
 if command -v ninja >/dev/null 2>&1; then
-  BUILD_DIR="$ROOT_DIR/work/llama-build-${TARGET_ARCH}-ninja"
   CMAKE_GENERATOR=(-G Ninja)
 else
-  BUILD_DIR="$ROOT_DIR/work/llama-build-${TARGET_ARCH}"
   CMAKE_GENERATOR=()
 fi
 
@@ -34,34 +32,52 @@ fi
 
 git -C "$SOURCE_DIR" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$SOURCE_DIR" checkout --detach "$LLAMA_COMMIT"
-PLATFORM_FLAGS=(-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF)
-if [[ "$HOST_OS" == "Darwin" ]]; then
-  PLATFORM_FLAGS+=("-DCMAKE_OSX_ARCHITECTURES=$TARGET_ARCH")
-fi
-if [[ "$HOST_OS:$TARGET_ARCH" == "Darwin:arm64" ]]; then
-  PLATFORM_FLAGS+=(-DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON)
-else
-  PLATFORM_FLAGS+=(-DGGML_METAL=OFF)
-fi
-
-cmake "${CMAKE_GENERATOR[@]}" -S "$SOURCE_DIR" -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  "${PLATFORM_FLAGS[@]}" \
-  -DLLAMA_BUILD_SERVER=ON \
-  -DLLAMA_BUILD_TESTS=OFF \
-  -DLLAMA_BUILD_EXAMPLES=OFF \
-  -DLLAMA_BUILD_APP=OFF \
-  -DLLAMA_BUILD_UI=OFF \
-  -DLLAMA_USE_PREBUILT_UI=OFF \
-  -DLLAMA_OPENSSL=OFF \
-  -DBUILD_SHARED_LIBS=OFF
-cmake --build "$BUILD_DIR" --config Release --target llama-server -j
 mkdir -p "$OUTPUT_DIR"
-cp "$BUILD_DIR/bin/llama-server" \
-  "$OUTPUT_DIR/llama-server-$TARGET_TRIPLE"
+
+build_backend() {
+  local backend="$1"
+  local output_suffix="$2"
+  shift 2
+  local generator_suffix=""
+  if (( ${#CMAKE_GENERATOR[@]} )); then
+    generator_suffix="-ninja"
+  fi
+  local build_dir="$ROOT_DIR/work/llama-build-${TARGET_ARCH}-${backend}${generator_suffix}"
+  local platform_flags=(-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF)
+  if [[ "$HOST_OS" == "Darwin" ]]; then
+    platform_flags+=("-DCMAKE_OSX_ARCHITECTURES=$TARGET_ARCH")
+  fi
+
+  cmake "${CMAKE_GENERATOR[@]}" -S "$SOURCE_DIR" -B "$build_dir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    "${platform_flags[@]}" \
+    "$@" \
+    -DLLAMA_BUILD_SERVER=ON \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_APP=OFF \
+    -DLLAMA_BUILD_UI=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF \
+    -DLLAMA_OPENSSL=OFF \
+    -DBUILD_SHARED_LIBS=OFF
+  cmake --build "$build_dir" --config Release --target llama-server -j
+  local destination="$OUTPUT_DIR/llama-server-$TARGET_TRIPLE$output_suffix"
+  cp "$build_dir/bin/llama-server" "$destination"
+  if [[ "$HOST_OS" == "Darwin" ]]; then
+    strip -x "$destination"
+  elif command -v strip >/dev/null 2>&1; then
+    strip "$destination"
+  fi
+  echo "$backend engine ready at $destination"
+}
+
 if [[ "$HOST_OS" == "Darwin" ]]; then
-  strip -x "$OUTPUT_DIR/llama-server-$TARGET_TRIPLE"
-elif command -v strip >/dev/null 2>&1; then
-  strip "$OUTPUT_DIR/llama-server-$TARGET_TRIPLE"
+  # Metal is available through the operating system and llama.cpp retains its
+  # CPU backend, so one binary can accelerate or fall back at runtime.
+  build_backend metal "" -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON
+else
+  # Keep an independent CPU executable so a missing or broken Vulkan loader
+  # can never prevent local narration.
+  build_backend cpu "" -DGGML_METAL=OFF -DGGML_VULKAN=OFF
+  build_backend vulkan "-vulkan" -DGGML_METAL=OFF -DGGML_VULKAN=ON
 fi
-echo "Native engine ready at $OUTPUT_DIR/llama-server-$TARGET_TRIPLE"

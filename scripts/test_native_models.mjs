@@ -123,8 +123,7 @@ if (!(await serverReady())) {
     "--jinja",
     "--no-webui",
   ];
-  if (process.platform === "darwin" && process.arch === "arm64")
-    args.push("--n-gpu-layers", "99");
+  args.push("--fit", "on");
   server = spawn(executable, args, { cwd: root, stdio: "ignore" });
   await waitForServer();
 }
@@ -150,7 +149,7 @@ try {
       "--nocapture",
     ],
     {
-      KOKORO_ORT_PROVIDER: "cpu",
+      KOKORO_ORT_PROVIDER: process.env.KOKORO_ORT_PROVIDER || "auto",
       KOKORO_MODEL_PATH: kokoroModel,
       KOKORO_VOICES_PATH: path.join(root, "src", "static", "voices"),
     },

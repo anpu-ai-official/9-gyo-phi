@@ -2,7 +2,8 @@
   "bundle": {
     "targets": ["nsis"],
     "resources": {
-      "binaries/llama-server-x86_64-pc-windows-msvc.exe": "llama-server.exe"
+      "binaries/llama-server-x86_64-pc-windows-msvc.exe": "llama-server.exe",
+      "binaries/llama-server-x86_64-pc-windows-msvc-vulkan.exe": "llama-server-vulkan.exe"
     },
     "windows": {
       "nsis": {

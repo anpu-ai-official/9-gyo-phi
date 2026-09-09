@@ -1,6 +1,6 @@
 [package]
 name = "nine-gyo-phi"
-version = "0.4.0"
+version = "0.5.0"
 description = "A private, local-first document reader and audiobook studio"
 authors = ["9-gyo-phi contributors"]
 license = "MIT"
@@ -25,7 +25,7 @@ base64 = "0.23"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "gzip", "brotli", "deflate", "json"] }
 url = "2.5"
 sha2 = "0.11"
-kokoro-en = { git = "https://github.com/anpu-ai-official/kokoro.git", rev = "ae890ef52039982a3a36be48ccbcdf686ed65069", default-features = false, features = ["misaki-lean"] }
+kokoro-en = { git = "https://github.com/anpu-ai-official/kokoro.git", rev = "478413f006dc629a88fef24069a04deba2ea2e0d", default-features = false, features = ["misaki-lean"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 oxideav-aac = "0.1.7"
 oxideav-core = "0.1"

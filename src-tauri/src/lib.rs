@@ -452,6 +452,7 @@ const NATIVE_LLM_MODEL_SHA256: &str =
 
 struct NativeEngineState {
     child: Mutex<Option<Child>>,
+    backend: Mutex<String>,
     cancel_download: std::sync::atomic::AtomicBool,
 }
 
@@ -462,7 +463,7 @@ struct NativeLlmStatus {
     running: bool,
     size: u64,
     model_name: &'static str,
-    acceleration: &'static str,
+    acceleration: String,
 }
 
 #[derive(serde::Serialize)]
@@ -487,26 +488,11 @@ fn native_llm_model_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(directory.join(NATIVE_LLM_MODEL_NAME))
 }
 
-fn native_llm_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let packaged = app
-        .path()
-        .resource_dir()
-        .ok()?
-        .join(native_llm_resource_name());
-    if packaged.is_file() {
-        return Some(packaged);
-    }
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(native_llm_development_name());
-    development.is_file().then_some(development)
-}
-
-fn native_llm_resource_name() -> &'static str {
+fn executable_name(name: &str) -> String {
     if cfg!(target_os = "windows") {
-        "llama-server.exe"
+        format!("{name}.exe")
     } else {
-        NATIVE_LLM_EXE_NAME
+        name.to_string()
     }
 }
 
@@ -527,42 +513,196 @@ fn native_llm_development_name() -> &'static str {
 }
 
 fn native_llm_acceleration() -> &'static str {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "Metal"
+    if cfg!(target_os = "macos") {
+        "Auto (Metal → CPU)"
+    } else if cfg!(any(target_os = "windows", target_os = "linux")) {
+        "Auto (CUDA pack → Vulkan → CPU)"
     } else {
         "CPU"
     }
 }
 
-fn spawn_native_llm(app: &tauri::AppHandle) -> Option<Child> {
+#[derive(Clone, Debug)]
+struct NativeLlmCandidate {
+    backend: &'static str,
+    executable: PathBuf,
+    gpu_marker: Option<&'static str>,
+}
+
+fn native_llm_candidates(app: &tauri::AppHandle, force_cpu: bool) -> Vec<NativeLlmCandidate> {
+    let mut candidates = Vec::new();
+    let executable = executable_name(NATIVE_LLM_EXE_NAME);
+    if !force_cpu {
+        if let Ok(data_dir) = app.path().app_data_dir() {
+            for (folder, backend, marker) in [
+                ("cuda", "CUDA", "CUDA"),
+                ("hip", "ROCm/HIP", "ROCm"),
+                ("sycl", "SYCL", "SYCL"),
+            ] {
+                let path = data_dir
+                    .join("accelerators")
+                    .join("llama")
+                    .join(folder)
+                    .join(&executable);
+                if path.is_file() {
+                    candidates.push(NativeLlmCandidate {
+                        backend,
+                        executable: path,
+                        gpu_marker: Some(marker),
+                    });
+                }
+            }
+        }
+        if cfg!(target_os = "macos") {
+            if let Some(path) = native_llm_packaged_or_development(app, false) {
+                candidates.push(NativeLlmCandidate {
+                    backend: "Metal",
+                    executable: path,
+                    gpu_marker: Some("MTL"),
+                });
+            }
+        } else if let Some(path) = native_llm_packaged_or_development(app, true) {
+            candidates.push(NativeLlmCandidate {
+                backend: "Vulkan",
+                executable: path,
+                gpu_marker: Some("Vulkan"),
+            });
+        }
+    }
+    if let Some(path) = native_llm_packaged_or_development(app, false) {
+        candidates.push(NativeLlmCandidate {
+            backend: "CPU",
+            executable: path,
+            gpu_marker: None,
+        });
+    }
+    candidates
+}
+
+fn native_llm_packaged_or_development(
+    app: &tauri::AppHandle,
+    accelerated: bool,
+) -> Option<PathBuf> {
+    let resource_name = if accelerated {
+        executable_name("llama-server-vulkan")
+    } else {
+        executable_name(NATIVE_LLM_EXE_NAME)
+    };
+    let packaged = app.path().resource_dir().ok()?.join(resource_name);
+    if packaged.is_file() {
+        return Some(packaged);
+    }
+    let mut development_name = native_llm_development_name().to_string();
+    if accelerated {
+        if cfg!(target_os = "windows") {
+            development_name = development_name.replace(".exe", "-vulkan.exe");
+        } else {
+            development_name.push_str("-vulkan");
+        }
+    }
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join(development_name);
+    development.is_file().then_some(development)
+}
+
+fn candidate_has_device(candidate: &NativeLlmCandidate) -> bool {
+    let Some(marker) = candidate.gpu_marker else {
+        return true;
+    };
+    let output = Command::new(&candidate.executable)
+        .arg("--list-devices")
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let listing = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.status.success() && device_listing_contains(&listing, marker)
+}
+
+fn device_listing_contains(listing: &str, marker: &str) -> bool {
+    listing
+        .to_ascii_lowercase()
+        .contains(&marker.to_ascii_lowercase())
+}
+
+fn spawn_native_llm(app: &tauri::AppHandle, force_cpu: bool) -> Option<(Child, String)> {
     if is_server_alive(ENGINE_PORT) {
         return None;
     }
-    let executable = native_llm_executable(app)?;
     let model = native_llm_model_path(app)?;
     if !model.is_file() {
         return None;
     }
-    log::info!("Starting native llama.cpp speech engine.");
-    let mut command = Command::new(executable);
-    command.arg("--model").arg(model).args([
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8765",
-        "--ctx-size",
-        "4096",
-        "--jinja",
-        "--no-webui",
-    ]);
-    if native_llm_acceleration() != "CPU" {
-        command.args(["--n-gpu-layers", "99"]);
+    for candidate in native_llm_candidates(app, force_cpu) {
+        if !candidate_has_device(&candidate) {
+            log::info!("Skipping unavailable {} speech backend.", candidate.backend);
+            continue;
+        }
+        log::info!(
+            "Starting native llama.cpp speech engine with {}.",
+            candidate.backend
+        );
+        let mut command = Command::new(&candidate.executable);
+        command.arg("--model").arg(&model).args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8765",
+            "--ctx-size",
+            "4096",
+            "--jinja",
+            "--no-webui",
+            "--fit",
+            "on",
+        ]);
+        if candidate.gpu_marker.is_none() {
+            command.args(["--device", "none", "--n-gpu-layers", "0"]);
+        }
+        if let Some(parent) = candidate.executable.parent() {
+            command.current_dir(parent);
+            #[cfg(target_os = "linux")]
+            command.env("LD_LIBRARY_PATH", parent);
+        }
+        if let Ok(child) = command.spawn() {
+            return Some((child, candidate.backend.to_string()));
+        }
     }
-    command.spawn().ok()
+    None
+}
+
+fn replace_native_llm(app: &tauri::AppHandle, state: &NativeEngineState, force_cpu: bool) -> bool {
+    if let Some(mut previous) = state.child.lock().unwrap().take() {
+        let _ = previous.kill();
+        let _ = previous.wait();
+    }
+    let Some((child, backend)) = spawn_native_llm(app, force_cpu) else {
+        return false;
+    };
+    *state.child.lock().unwrap() = Some(child);
+    *state.backend.lock().unwrap() = backend;
+    true
+}
+
+fn wait_for_native_llm() -> bool {
+    for _ in 0..120 {
+        if is_server_alive(ENGINE_PORT) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 #[tauri::command]
-fn native_llm_status(app: tauri::AppHandle) -> NativeLlmStatus {
+fn native_llm_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, NativeEngineState>,
+) -> NativeLlmStatus {
     let model = native_llm_model_path(&app);
     let size = model
         .as_ref()
@@ -574,7 +714,7 @@ fn native_llm_status(app: tauri::AppHandle) -> NativeLlmStatus {
         running: is_server_alive(ENGINE_PORT),
         size,
         model_name: "Qwen2.5-Coder-3B Q4_K_M",
-        acceleration: native_llm_acceleration(),
+        acceleration: state.backend.lock().unwrap().clone(),
     }
 }
 
@@ -605,9 +745,9 @@ async fn download_native_llm(
         .ok_or_else(|| "The local model folder is unavailable.".to_string())?;
     if model.is_file() {
         if !is_server_alive(ENGINE_PORT) {
-            *state.child.lock().unwrap() = spawn_native_llm(&app);
+            replace_native_llm(&app, &state, false);
         }
-        return Ok(native_llm_status(app));
+        return Ok(native_llm_status(app, state));
     }
     state
         .cancel_download
@@ -680,8 +820,8 @@ async fn download_native_llm(
     }
     std::fs::rename(&temporary, &model)
         .map_err(|_| "The verified model could not be installed.".to_string())?;
-    *state.child.lock().unwrap() = spawn_native_llm(&app);
-    Ok(native_llm_status(app))
+    replace_native_llm(&app, &state, false);
+    Ok(native_llm_status(app, state))
 }
 
 fn speech_messages(text: &str, is_code: bool) -> serde_json::Value {
@@ -762,15 +902,14 @@ async fn prepare_speech_native(
         return Err("Speech preparation accepts 1–10,000 characters.".to_string());
     }
     if !is_server_alive(ENGINE_PORT) {
-        let child = spawn_native_llm(&app).ok_or_else(|| {
-            "Install the native local LLM before enabling preparation.".to_string()
-        })?;
-        *state.child.lock().unwrap() = Some(child);
-        for _ in 0..120 {
-            if is_server_alive(ENGINE_PORT) {
-                break;
+        if !replace_native_llm(&app, &state, false) {
+            return Err("Install the native local LLM before enabling preparation.".to_string());
+        }
+        if !wait_for_native_llm() && state.backend.lock().unwrap().as_str() != "CPU" {
+            log::warn!("Accelerated native LLM failed to start; retrying on CPU.");
+            if replace_native_llm(&app, &state, true) {
+                wait_for_native_llm();
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
     if !is_server_alive(ENGINE_PORT) {
@@ -989,9 +1128,7 @@ async fn warm_speech_engines(
     kokoro_state: tauri::State<'_, KokoroState>,
 ) -> Result<bool, String> {
     if !is_server_alive(ENGINE_PORT) {
-        if let Some(child) = spawn_native_llm(&app) {
-            *native_state.child.lock().unwrap() = Some(child);
-        }
+        replace_native_llm(&app, &native_state, false);
     }
 
     let (model, voices) = kokoro_paths(&app)?;
@@ -1363,6 +1500,7 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::default().build())
         .manage(NativeEngineState {
             child: Mutex::new(None),
+            backend: Mutex::new("Not running".to_string()),
             cancel_download: std::sync::atomic::AtomicBool::new(false),
         })
         .manage(KokoroState {
@@ -1388,8 +1526,8 @@ pub fn run() {
             warm_speech_engines
         ])
         .setup(|app| {
-            let child = spawn_native_llm(app.handle());
-            *app.state::<NativeEngineState>().child.lock().unwrap() = child;
+            let state = app.state::<NativeEngineState>();
+            replace_native_llm(app.handle(), &state, false);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1441,6 +1579,19 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(name.ends_with(".exe"));
         }
+    }
+
+    #[test]
+    fn accelerator_device_detection_is_case_insensitive_and_backend_specific() {
+        let listing =
+            "Available devices:\n  CUDA0: NVIDIA RTX 4070\n  Vulkan1: Intel Arc\n  BLAS: CPU";
+        assert!(device_listing_contains(listing, "CUDA"));
+        assert!(device_listing_contains(listing, "vulkan"));
+        assert!(!device_listing_contains(listing, "MTL"));
+        assert!(!device_listing_contains(
+            "Available devices:\n  BLAS: CPU",
+            "CUDA"
+        ));
     }
 
     #[test]

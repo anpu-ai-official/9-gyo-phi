@@ -4,6 +4,20 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-09
+
+### Added
+
+- Automatic accelerator discovery with verified device probing, GPU-first startup, partial-offload fitting, and an independent CPU recovery path.
+- Metal acceleration for both macOS architectures and Vulkan llama.cpp builds for Windows and Linux.
+- CoreML and DirectML Kokoro execution providers with real inference probes and automatic CPU fallback.
+- Optional CUDA, ROCm/HIP, and SYCL accelerator-pack discovery in local application data.
+
+### Changed
+
+- Real-model verification now exercises the automatic Kokoro provider instead of forcing CPU.
+- Windows and Linux release bundles carry both Vulkan and CPU llama.cpp engines so a missing or broken GPU stack cannot disable narration.
+
 ## [0.4.0] - 2026-09-09
 
 ### Added
@@ -63,7 +77,8 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 - Initial local document reader and speech prototype.
 
-[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/anpu-ai-official/9-gyo-phi/compare/v0.2.0...v0.3.0

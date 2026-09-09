@@ -69,7 +69,11 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
-          patchelf libssl-dev ninja-build
+          patchelf libssl-dev ninja-build libvulkan-dev glslc spirv-headers
+      - name: Install Windows Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: choco install vulkan-sdk --no-progress -y
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
       - run: npm ci
@@ -79,7 +83,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: src-tauri/binaries/llama-server-*
-          key: llama-server-${{ matrix.target }}-9113cc1880763bf590774490f51a661bf22403a4-v3
+          key: llama-server-${{ matrix.target }}-9113cc1880763bf590774490f51a661bf22403a4-v4
       - name: Build native engine
         if: steps.native-engine-cache.outputs.cache-hit != 'true'
         run: npm run build:native-engine
